@@ -1,0 +1,12 @@
+node_modules/
+.DS_Store
+*.log
+
+# Obsidian build cache
+.obsidian/
+
+# Keep release assets in the repository when publishing:
+!main.js
+!manifest.json
+!styles.css
+.ace-tool/
