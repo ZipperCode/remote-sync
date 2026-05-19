@@ -144,6 +144,30 @@ describe("SyncEngine", () => {
     expect(adapter.value).not.toContain("deleted.md");
   });
 
+  test("auto-propagates simple deletes in balanced mode", async () => {
+    const oldDeleted = file("deleted.md", 100);
+    const adapter = new MemoryAdapter(
+      JSON.stringify({ version: 1, lastSyncTime: 123, previousEntries: [previous(oldDeleted)] })
+    );
+    const stateStore = new SyncStateStore(adapter);
+    const local = new FakeStore([]);
+    const remote = new FakeStore([oldDeleted]);
+    const engine = new SyncEngine(local, remote, stateStore, {
+      ignorePatterns: [],
+      syncSafetyMode: "balanced",
+      maxAutoDeleteRatio: 1
+    });
+
+    const result = await engine.syncOnce();
+
+    expect(result.summary.pendingConfirmations).toBe(0);
+    expect(result.summary.deletedRemote).toBe(1);
+    expect(result.summary.backedUp).toBe(1);
+    expect(local.written.some((path) => path.startsWith(".remote-sync-trash/") && path.includes("/remote/"))).toBe(true);
+    expect(remote.deleted).toEqual(["deleted.md"]);
+    expect(adapter.value).not.toContain("deleted.md");
+  });
+
   test("records delete-remote failure details after preserving a local backup", async () => {
     const oldDeleted = file("deleted.md", 100);
     const adapter = new MemoryAdapter(
@@ -211,7 +235,7 @@ describe("SyncEngine", () => {
     expect(adapter.value).not.toContain("remote.md");
   });
 
-  test("executes safe operations but keeps state unchanged when confirmations are pending", async () => {
+  test("executes safe operations but keeps state unchanged when manual confirmations are pending", async () => {
     const old = file("note.md", 100, 10);
     const localOnly = file("local.md", 200);
     const adapter = new MemoryAdapter(
@@ -221,7 +245,10 @@ describe("SyncEngine", () => {
     const local = new FakeStore([file("note.md", 200, 11), localOnly]);
     const remote = new FakeStore([file("note.md", 200, 12)]);
     const before = adapter.value;
-    const engine = new SyncEngine(local, remote, stateStore, { ignorePatterns: [] });
+    const engine = new SyncEngine(local, remote, stateStore, {
+      ignorePatterns: [],
+      syncSafetyMode: "manual"
+    });
 
     const result = await engine.syncOnce();
 
@@ -276,6 +303,139 @@ describe("SyncEngine", () => {
     expect(remote.readText("note.md")).toBe("alpha local\nbeta remote\n");
     expect(adapter.value).toContain("\"mergeBase\"");
     expect(adapter.value).toContain("alpha local\\nbeta remote\\n");
+  });
+
+  test("auto-uploads oversized text conflicts when local is newer", async () => {
+    const old = file("big.md", 100, 10);
+    const adapter = new MemoryAdapter(
+      JSON.stringify({
+        version: 1,
+        lastSyncTime: 123,
+        previousEntries: [previous(old, "base\n")]
+      })
+    );
+    const stateStore = new SyncStateStore(adapter);
+    const local = new FakeStore([file("big.md", 300, 70 * 1024)], { "big.md": "local large" });
+    const remote = new FakeStore([file("big.md", 200, 70 * 1024)], { "big.md": "remote large" });
+    const engine = new SyncEngine(local, remote, stateStore, {
+      ignorePatterns: [],
+      nonMergeableConflictPolicy: "newer-wins"
+    });
+
+    const result = await engine.syncOnce();
+
+    expect(result.summary.pendingConfirmations).toBe(0);
+    expect(result.summary.uploaded).toBe(1);
+    expect(result.summary.downloaded).toBe(0);
+    expect(result.summary.backedUp).toBe(1);
+    expect(remote.readText("big.md")).toBe("local large");
+  });
+
+  test("auto-downloads oversized text conflicts when remote is newer", async () => {
+    const old = file("big.md", 100, 10);
+    const adapter = new MemoryAdapter(
+      JSON.stringify({
+        version: 1,
+        lastSyncTime: 123,
+        previousEntries: [previous(old, "base\n")]
+      })
+    );
+    const stateStore = new SyncStateStore(adapter);
+    const local = new FakeStore([file("big.md", 200, 70 * 1024)], { "big.md": "local large" });
+    const remote = new FakeStore([file("big.md", 300, 70 * 1024)], { "big.md": "remote large" });
+    const engine = new SyncEngine(local, remote, stateStore, {
+      ignorePatterns: [],
+      nonMergeableConflictPolicy: "newer-wins"
+    });
+
+    const result = await engine.syncOnce();
+
+    expect(result.summary.pendingConfirmations).toBe(0);
+    expect(result.summary.uploaded).toBe(0);
+    expect(result.summary.downloaded).toBe(1);
+    expect(result.summary.backedUp).toBe(1);
+    expect(local.readText("big.md")).toBe("remote large");
+  });
+
+  test("auto-uploads binary conflicts with equal mtimes by preferring local", async () => {
+    const old = file("image.png", 100, 10);
+    const adapter = new MemoryAdapter(
+      JSON.stringify({ version: 1, lastSyncTime: 123, previousEntries: [previous(old)] })
+    );
+    const stateStore = new SyncStateStore(adapter);
+    const local = new FakeStore([file("image.png", 300, 12)], { "image.png": "local image" });
+    const remote = new FakeStore([file("image.png", 300, 13)], { "image.png": "remote image" });
+    const engine = new SyncEngine(local, remote, stateStore, {
+      ignorePatterns: [],
+      nonMergeableConflictPolicy: "newer-wins"
+    });
+
+    const result = await engine.syncOnce();
+
+    expect(result.summary.pendingConfirmations).toBe(0);
+    expect(result.summary.uploaded).toBe(1);
+    expect(result.summary.backedUp).toBe(1);
+    expect(remote.readText("image.png")).toBe("local image");
+  });
+
+  test("keeps auto-merge candidates pending in manual mode", async () => {
+    const old = file("note.md", 100, 20);
+    const adapter = new MemoryAdapter(
+      JSON.stringify({
+        version: 1,
+        lastSyncTime: 123,
+        previousEntries: [previous(old, "alpha\nbeta\n")]
+      })
+    );
+    const stateStore = new SyncStateStore(adapter);
+    const local = new FakeStore([file("note.md", 300, 24)], { "note.md": "alpha local\nbeta\n" });
+    const remote = new FakeStore([file("note.md", 200, 25)], { "note.md": "alpha\nbeta remote\n" });
+    const before = adapter.value;
+    const engine = new SyncEngine(local, remote, stateStore, {
+      ignorePatterns: [],
+      syncSafetyMode: "manual"
+    });
+
+    const result = await engine.syncOnce();
+
+    expect(result.summary.pendingConfirmations).toBe(1);
+    expect(result.summary.merged).toBe(0);
+    expect(result.plan.confirmations).toEqual([
+      expect.objectContaining({ path: "note.md", conflictType: "text-auto-merge" })
+    ]);
+    expect(local.written).toEqual([]);
+    expect(remote.written).toEqual([]);
+    expect(adapter.value).toBe(before);
+  });
+
+  test("keeps non-mergeable conflicts pending in manual mode", async () => {
+    const old = file("big.md", 100, 10);
+    const adapter = new MemoryAdapter(
+      JSON.stringify({
+        version: 1,
+        lastSyncTime: 123,
+        previousEntries: [previous(old, "base\n")]
+      })
+    );
+    const stateStore = new SyncStateStore(adapter);
+    const local = new FakeStore([file("big.md", 300, 70 * 1024)], { "big.md": "local large" });
+    const remote = new FakeStore([file("big.md", 200, 70 * 1024)], { "big.md": "remote large" });
+    const before = adapter.value;
+    const engine = new SyncEngine(local, remote, stateStore, {
+      ignorePatterns: [],
+      syncSafetyMode: "manual",
+      nonMergeableConflictPolicy: "newer-wins"
+    });
+
+    const result = await engine.syncOnce();
+
+    expect(result.summary.pendingConfirmations).toBe(1);
+    expect(result.summary.uploaded).toBe(0);
+    expect(result.plan.confirmations).toEqual([
+      expect.objectContaining({ path: "big.md", conflictType: "text-too-large" })
+    ]);
+    expect(remote.readText("big.md")).toBe("remote large");
+    expect(adapter.value).toBe(before);
   });
 
   test("does not overwrite when backup fails", async () => {

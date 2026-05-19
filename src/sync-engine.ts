@@ -8,7 +8,7 @@ import {
 } from "./sync-planner";
 import { SyncStateStore } from "./sync-state-store";
 import { normalizeVaultPath, REMOTE_SYNC_TRASH_DIR, shouldIgnorePath } from "./path-utils";
-import { SyncConfirmationAction } from "./sync-types";
+import { NonMergeableConflictPolicy, SyncConfirmationAction, SyncSafetyMode } from "./sync-types";
 import { decodeTextContent, encodeTextContent, mergeTextContent } from "./text-merge";
 
 export type InitialSyncMode = "ask" | "merge" | "use-local" | "use-remote";
@@ -34,6 +34,9 @@ export interface SyncRemoteStore {
 export interface SyncEngineOptions {
   ignorePatterns: string[];
   pluginId?: string;
+  syncSafetyMode?: SyncSafetyMode;
+  maxAutoDeleteRatio?: number;
+  nonMergeableConflictPolicy?: NonMergeableConflictPolicy;
 }
 
 export interface SyncSummary {
@@ -123,7 +126,9 @@ export class SyncEngine {
         remote: remoteSnapshot,
         previous: previousEntries,
         ignorePatterns: this.options.ignorePatterns,
-        pluginId: this.options.pluginId
+        pluginId: this.options.pluginId,
+        syncSafetyMode: this.options.syncSafetyMode,
+        maxAutoDeleteRatio: this.options.maxAutoDeleteRatio
       });
     }
 
@@ -463,7 +468,23 @@ export class SyncEngine {
   }
 
   private defaultAction(confirmation: SyncConfirmation): SyncConfirmationAction | undefined {
-    return confirmation.suggestedKind === "merge" ? "auto-merge" : undefined;
+    if (this.options.syncSafetyMode === "manual") {
+      return undefined;
+    }
+    if (confirmation.suggestedKind === "merge") {
+      return "auto-merge";
+    }
+    if (
+      (this.options.nonMergeableConflictPolicy ?? "newer-wins") === "newer-wins" &&
+      confirmation.local &&
+      confirmation.remote &&
+      (confirmation.conflictType === "text-too-large" ||
+        confirmation.conflictType === "binary" ||
+        confirmation.conflictType === "text-no-base")
+    ) {
+      return confirmation.local.mtime >= confirmation.remote.mtime ? "use-local" : "use-remote";
+    }
+    return undefined;
   }
 
   private incrementSummary(summary: SyncSummary, operation: SyncOperation): void {

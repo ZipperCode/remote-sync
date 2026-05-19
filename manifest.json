@@ -1,7 +1,7 @@
 {
   "id": "obsidian-webdav-sync",
   "name": "WebDAV 同步",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minAppVersion": "1.5.7",
   "description": "自动和手动双向同步普通库文件与附件到 WebDAV。",
   "author": "",

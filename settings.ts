@@ -3,6 +3,7 @@ import type RemoteSyncPlugin from "./main";
 import { parseCustomHeaders } from "./src/custom-headers";
 import { normalizeRemoteRoot } from "./src/path-utils";
 import { getDefaultS3Options, S3AddressingStyle, S3Preset } from "./src/s3-remote";
+import type { NonMergeableConflictPolicy, SyncSafetyMode } from "./src/sync-types";
 
 export type RemoteProvider = "webdav" | "s3";
 type RemoteProviderOption = "webdav" | S3Preset;
@@ -24,6 +25,9 @@ export interface RemoteSyncSettings {
   s3SessionToken: string;
   s3AddressingStyle: S3AddressingStyle;
   ignorePatterns: string[];
+  syncSafetyMode: SyncSafetyMode;
+  maxAutoDeleteRatio: number;
+  nonMergeableConflictPolicy: NonMergeableConflictPolicy;
 }
 
 export const DEFAULT_SETTINGS: RemoteSyncSettings = {
@@ -42,8 +46,14 @@ export const DEFAULT_SETTINGS: RemoteSyncSettings = {
   s3SecretAccessKey: "",
   s3SessionToken: "",
   s3AddressingStyle: "path",
-  ignorePatterns: []
+  ignorePatterns: [],
+  syncSafetyMode: "balanced",
+  maxAutoDeleteRatio: 0.3,
+  nonMergeableConflictPolicy: "newer-wins"
 };
+
+const SYNC_SAFETY_MODES: SyncSafetyMode[] = ["safe", "balanced", "manual"];
+const NON_MERGEABLE_CONFLICT_POLICIES: NonMergeableConflictPolicy[] = ["newer-wins"];
 
 export function normalizeRemoteSyncSettings(
   settings: Partial<RemoteSyncSettings> | undefined,
@@ -63,6 +73,17 @@ export function normalizeRemoteSyncSettings(
   normalized.remoteRoot = normalizeRemoteRoot(normalized.remoteRoot);
   normalized.s3Prefix = normalizeRemoteRoot(normalized.s3Prefix);
   normalized.ignorePatterns = normalized.ignorePatterns ?? [];
+  if (!SYNC_SAFETY_MODES.includes(normalized.syncSafetyMode)) {
+    normalized.syncSafetyMode = DEFAULT_SETTINGS.syncSafetyMode;
+  }
+  if (!NON_MERGEABLE_CONFLICT_POLICIES.includes(normalized.nonMergeableConflictPolicy)) {
+    normalized.nonMergeableConflictPolicy = DEFAULT_SETTINGS.nonMergeableConflictPolicy;
+  }
+  const maxAutoDeleteRatio = Number(normalized.maxAutoDeleteRatio);
+  normalized.maxAutoDeleteRatio =
+    Number.isFinite(maxAutoDeleteRatio) && maxAutoDeleteRatio >= 0
+      ? Math.min(maxAutoDeleteRatio, 1)
+      : DEFAULT_SETTINGS.maxAutoDeleteRatio;
 
   return normalized;
 }
@@ -168,6 +189,51 @@ export class RemoteSyncSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("自动同步")
       .setDesc("已启用。文件新增、修改、删除或重命名后，会在 3 秒无新变化时自动同步。");
+
+    new Setting(containerEl)
+      .setName("同步确认策略")
+      .setDesc("平衡模式会自动传播普通新增、修改和删除；不可合并的大文件冲突按下方策略自动处理。")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("balanced", "平衡：只确认真实冲突")
+          .addOption("safe", "安全：删除和冲突都确认")
+          .addOption("manual", "手动：风险操作都确认")
+          .setValue(this.plugin.settings.syncSafetyMode)
+          .onChange(async (value) => {
+            this.plugin.settings.syncSafetyMode = value as SyncSafetyMode;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("不可合并冲突")
+      .setDesc("大文件、二进制文件或缺少基线的双方修改冲突，自动使用修改时间较新的一侧；时间相同则使用本地版本。")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("newer-wins", "较新文件覆盖")
+          .setValue(this.plugin.settings.nonMergeableConflictPolicy)
+          .onChange(async (value) => {
+            this.plugin.settings.nonMergeableConflictPolicy =
+              value as NonMergeableConflictPolicy;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("自动删除上限")
+      .setDesc("单次同步自动删除数量超过当前文件总数的比例时，改为待确认，防止异常远端列表导致大批量误删。")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("0.1", "10%")
+          .addOption("0.3", "30%")
+          .addOption("0.5", "50%")
+          .addOption("1", "100%")
+          .setValue(String(this.plugin.settings.maxAutoDeleteRatio))
+          .onChange(async (value) => {
+            this.plugin.settings.maxAutoDeleteRatio = Number(value);
+            await this.plugin.saveSettings();
+          })
+      );
 
     new Setting(containerEl)
       .setName("手动同步")

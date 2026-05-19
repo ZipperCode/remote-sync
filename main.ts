@@ -530,7 +530,10 @@ export default class RemoteSyncPlugin extends Plugin {
       new SyncStateStore(new PluginSyncStateAdapter(this)),
       {
         ignorePatterns: this.settings.ignorePatterns,
-        pluginId: this.manifest.id
+        pluginId: this.manifest.id,
+        syncSafetyMode: this.settings.syncSafetyMode,
+        maxAutoDeleteRatio: this.settings.maxAutoDeleteRatio,
+        nonMergeableConflictPolicy: this.settings.nonMergeableConflictPolicy
       }
     );
   }

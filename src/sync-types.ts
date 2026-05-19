@@ -8,6 +8,10 @@ export interface FileEntry {
   etag?: string;
 }
 
+export type SyncSafetyMode = "safe" | "balanced" | "manual";
+
+export type NonMergeableConflictPolicy = "newer-wins";
+
 export interface PreviousEntry {
   path: string;
   local?: FileEntry;

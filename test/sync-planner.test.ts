@@ -78,6 +78,74 @@ describe("SyncPlanner", () => {
     ]);
   });
 
+  test("auto-propagates simple deletes in balanced mode", () => {
+    const oldLocal = file("local-deleted.md", 100);
+    const oldRemote = file("remote-deleted.md", 100);
+    const plan = planSync({
+      local: [oldRemote],
+      remote: [oldLocal],
+      previous: [previous(oldLocal), previous(oldRemote)],
+      ignorePatterns: [],
+      syncSafetyMode: "balanced",
+      maxAutoDeleteRatio: 1
+    });
+
+    expect(plan.confirmations).toEqual([]);
+    expect(plan.operations).toEqual([
+      expect.objectContaining({
+        kind: "delete-remote",
+        path: "local-deleted.md",
+        reason: "local-deleted"
+      }),
+      expect.objectContaining({
+        kind: "delete-local",
+        path: "remote-deleted.md",
+        reason: "remote-deleted"
+      })
+    ]);
+  });
+
+  test("keeps delete-vs-modify conflicts manual in balanced mode", () => {
+    const old = file("deleted.md", 100, 10);
+    const plan = planSync({
+      local: [file("deleted.md", 300, 12)],
+      remote: [],
+      previous: [previous(old)],
+      ignorePatterns: [],
+      syncSafetyMode: "balanced",
+      maxAutoDeleteRatio: 1
+    });
+
+    expect(plan.operations).toEqual([]);
+    expect(plan.confirmations).toEqual([
+      expect.objectContaining({
+        path: "deleted.md",
+        reason: "remote-deleted-local-changed",
+        conflictType: "delete-vs-modify"
+      })
+    ]);
+  });
+
+  test("downgrades large balanced delete batches to confirmations", () => {
+    const deletedA = file("deleted-a.md", 100);
+    const deletedB = file("deleted-b.md", 100);
+    const kept = file("kept.md", 100);
+    const plan = planSync({
+      local: [deletedA, deletedB, kept],
+      remote: [kept],
+      previous: [previous(deletedA), previous(deletedB), previous(kept)],
+      ignorePatterns: [],
+      syncSafetyMode: "balanced",
+      maxAutoDeleteRatio: 0.3
+    });
+
+    expect(plan.operations).toEqual([]);
+    expect(plan.confirmations).toEqual([
+      expect.objectContaining({ path: "deleted-b.md", reason: "remote-deleted" }),
+      expect.objectContaining({ path: "deleted-a.md", reason: "remote-deleted" })
+    ]);
+  });
+
   test("marks mergeable text conflicts as auto-merge candidates", () => {
     const old = file("note.md", 100, 10);
     const plan = planSync({

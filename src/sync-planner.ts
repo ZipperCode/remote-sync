@@ -6,7 +6,8 @@ import {
   SyncConfirmation,
   SyncConflict,
   SyncOperation,
-  SyncPlan
+  SyncPlan,
+  SyncSafetyMode
 } from "./sync-types";
 import { isAutoMergeTextEntry, MAX_MERGE_BASE_BYTES } from "./text-merge";
 
@@ -27,13 +28,19 @@ export interface PlanSyncInput {
   previous: PreviousEntry[];
   ignorePatterns: string[];
   pluginId?: string;
+  syncSafetyMode?: SyncSafetyMode;
+  maxAutoDeleteRatio?: number;
 }
+
+const DEFAULT_MAX_AUTO_DELETE_RATIO = 0.3;
 
 export function planSync(input: PlanSyncInput): SyncPlan {
   const skipped: SkippedEntry[] = [];
   const local = buildEntryMap(input.local, "local", input.ignorePatterns, skipped, input.pluginId);
   const remote = buildEntryMap(input.remote, "remote", input.ignorePatterns, skipped, input.pluginId);
   const previous = buildPreviousMap(input.previous, input.ignorePatterns, input.pluginId);
+  const syncSafetyMode = input.syncSafetyMode ?? "safe";
+  const maxAutoDeleteRatio = input.maxAutoDeleteRatio ?? DEFAULT_MAX_AUTO_DELETE_RATIO;
 
   const paths = new Set<string>([
     ...local.keys(),
@@ -54,12 +61,12 @@ export function planSync(input: PlanSyncInput): SyncPlan {
     }
 
     if (localEntry && !remoteEntry) {
-      planLocalOnly(operations, confirmations, localEntry, previousEntry);
+      planLocalOnly(operations, confirmations, localEntry, previousEntry, syncSafetyMode);
       continue;
     }
 
     if (!localEntry && remoteEntry) {
-      planRemoteOnly(operations, confirmations, remoteEntry, previousEntry);
+      planRemoteOnly(operations, confirmations, remoteEntry, previousEntry, syncSafetyMode);
       continue;
     }
 
@@ -67,6 +74,13 @@ export function planSync(input: PlanSyncInput): SyncPlan {
       planBothPresent(operations, confirmations, localEntry, remoteEntry, previousEntry);
     }
   }
+
+  protectLargeAutoDeleteBatch(
+    operations,
+    confirmations,
+    new Set([...local.keys(), ...remote.keys()]).size,
+    maxAutoDeleteRatio
+  );
 
   return { operations, confirmations, conflicts: confirmations, skipped };
 }
@@ -132,7 +146,8 @@ function planLocalOnly(
   operations: SyncOperation[],
   confirmations: SyncConfirmation[],
   local: FileEntry,
-  previous?: PreviousEntry
+  previous: PreviousEntry | undefined,
+  syncSafetyMode: SyncSafetyMode
 ): void {
   if (!previous) {
     operations.push({ kind: "upload", path: local.path, reason: "local-only", local });
@@ -144,6 +159,17 @@ function planLocalOnly(
       path: local.path,
       reason: "remote-deleted-local-changed",
       conflictType: "delete-vs-modify",
+      local,
+      previous
+    });
+    return;
+  }
+
+  if (syncSafetyMode === "balanced") {
+    operations.push({
+      kind: "delete-local",
+      path: local.path,
+      reason: "remote-deleted",
       local,
       previous
     });
@@ -163,7 +189,8 @@ function planRemoteOnly(
   operations: SyncOperation[],
   confirmations: SyncConfirmation[],
   remote: FileEntry,
-  previous?: PreviousEntry
+  previous: PreviousEntry | undefined,
+  syncSafetyMode: SyncSafetyMode
 ): void {
   if (!previous) {
     operations.push({ kind: "download", path: remote.path, reason: "remote-only", remote });
@@ -181,6 +208,17 @@ function planRemoteOnly(
     return;
   }
 
+  if (syncSafetyMode === "balanced") {
+    operations.push({
+      kind: "delete-remote",
+      path: remote.path,
+      reason: "local-deleted",
+      remote,
+      previous
+    });
+    return;
+  }
+
   confirmations.push({
     path: remote.path,
     reason: "local-deleted",
@@ -188,6 +226,58 @@ function planRemoteOnly(
     remote,
     previous
   });
+}
+
+function protectLargeAutoDeleteBatch(
+  operations: SyncOperation[],
+  confirmations: SyncConfirmation[],
+  currentPathCount: number,
+  maxAutoDeleteRatio: number
+): void {
+  const deleteOperations = operations.filter(
+    (operation) => operation.kind === "delete-local" || operation.kind === "delete-remote"
+  );
+  if (deleteOperations.length === 0 || currentPathCount === 0) {
+    return;
+  }
+  const deleteRatio = deleteOperations.length / currentPathCount;
+  if (deleteRatio <= maxAutoDeleteRatio) {
+    return;
+  }
+
+  for (let index = operations.length - 1; index >= 0; index -= 1) {
+    const operation = operations[index];
+    const confirmation = confirmationFromDeleteOperation(operation);
+    if (!confirmation) {
+      continue;
+    }
+    operations.splice(index, 1);
+    confirmations.push(confirmation);
+  }
+}
+
+function confirmationFromDeleteOperation(operation: SyncOperation): SyncConfirmation | null {
+  if (operation.kind === "delete-local" && operation.local) {
+    return {
+      path: operation.path,
+      reason: "remote-deleted",
+      conflictType: "delete-vs-modify",
+      local: operation.local,
+      previous: operation.previous
+    };
+  }
+
+  if (operation.kind === "delete-remote" && operation.remote) {
+    return {
+      path: operation.path,
+      reason: "local-deleted",
+      conflictType: "delete-vs-modify",
+      remote: operation.remote,
+      previous: operation.previous
+    };
+  }
+
+  return null;
 }
 
 function planBothPresent(
