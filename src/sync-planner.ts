@@ -1,4 +1,4 @@
-import { normalizeVaultPath, shouldIgnorePath } from "./path-utils";
+import { isRemoteSyncTrashPath, normalizeVaultPath, shouldIgnorePath } from "./path-utils";
 import {
   FileEntry,
   PreviousEntry,
@@ -8,6 +8,7 @@ import {
   SyncOperation,
   SyncPlan
 } from "./sync-types";
+import { isAutoMergeTextEntry, MAX_MERGE_BASE_BYTES } from "./text-merge";
 
 export type {
   FileEntry,
@@ -85,7 +86,9 @@ function buildEntryMap(
       continue;
     }
     if (shouldIgnorePath(normalized.path, ignorePatterns, pluginId)) {
-      skipped.push({ path: normalized.path, side, entry: normalized });
+      if (!isRemoteSyncTrashPath(normalized.path)) {
+        skipped.push({ path: normalized.path, side, entry: normalized });
+      }
       continue;
     }
     map.set(normalized.path, normalized);
@@ -110,7 +113,8 @@ function buildPreviousMap(
     map.set(normalized, {
       path: normalized,
       local: entry.local ? normalizeEntry(entry.local) : undefined,
-      remote: entry.remote ? normalizeEntry(entry.remote) : undefined
+      remote: entry.remote ? normalizeEntry(entry.remote) : undefined,
+      mergeBase: entry.mergeBase ? { ...entry.mergeBase } : undefined
     });
   }
 
@@ -139,16 +143,17 @@ function planLocalOnly(
     confirmations.push({
       path: local.path,
       reason: "remote-deleted-local-changed",
+      conflictType: "delete-vs-modify",
       local,
       previous
     });
     return;
   }
 
-  operations.push({
-    kind: "delete-local",
+  confirmations.push({
     path: local.path,
     reason: "remote-deleted",
+    conflictType: "delete-vs-modify",
     local,
     previous
   });
@@ -169,16 +174,17 @@ function planRemoteOnly(
     confirmations.push({
       path: remote.path,
       reason: "local-deleted-remote-changed",
+      conflictType: "delete-vs-modify",
       remote,
       previous
     });
     return;
   }
 
-  operations.push({
-    kind: "delete-remote",
+  confirmations.push({
     path: remote.path,
     reason: "local-deleted",
+    conflictType: "delete-vs-modify",
     remote,
     previous
   });
@@ -250,9 +256,12 @@ function planContentConfirmation(
 ): void {
   if (local.mtime === remote.mtime) {
     if (local.size !== remote.size) {
+      const classification = classifyContentConflict(local, remote, previous);
       confirmations.push({
         path: local.path,
         reason: "same-mtime-different-size",
+        conflictType: classification.conflictType,
+        suggestedKind: classification.suggestedKind,
         local,
         remote,
         previous
@@ -261,14 +270,36 @@ function planContentConfirmation(
     return;
   }
 
+  const classification = classifyContentConflict(local, remote, previous);
   confirmations.push({
     path: local.path,
     reason: "both-changed",
-    suggestedKind: local.mtime > remote.mtime ? "upload" : "download",
+    conflictType: classification.conflictType,
+    suggestedKind: classification.suggestedKind,
     local,
     remote,
     previous
   });
+}
+
+function classifyContentConflict(
+  local: FileEntry,
+  remote: FileEntry,
+  previous?: PreviousEntry
+): Pick<SyncConfirmation, "conflictType" | "suggestedKind"> {
+  if (!isAutoMergeTextEntry(local) || !isAutoMergeTextEntry(remote)) {
+    return { conflictType: "binary" };
+  }
+
+  if (local.size > MAX_MERGE_BASE_BYTES || remote.size > MAX_MERGE_BASE_BYTES) {
+    return { conflictType: "text-too-large" };
+  }
+
+  if (!previous?.mergeBase?.content) {
+    return { conflictType: "text-no-base" };
+  }
+
+  return { conflictType: "text-auto-merge", suggestedKind: "merge" };
 }
 
 function entryChanged(current: FileEntry, previous?: FileEntry): boolean {

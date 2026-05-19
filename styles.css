@@ -1,3 +1,45 @@
 .webdav-sync-status {
   font-size: var(--font-ui-small);
 }
+
+.remote-sync-code-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.remote-sync-code-view__header {
+  align-items: center;
+  border-bottom: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 8px 12px;
+}
+
+.remote-sync-code-view__path {
+  flex: 1 1 auto;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-small);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remote-sync-code-view__language {
+  background-color: var(--background-modifier-hover);
+  border-radius: 999px;
+  color: var(--text-normal);
+  flex: 0 0 auto;
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-medium);
+  letter-spacing: 0.02em;
+  padding: 3px 10px;
+  text-transform: uppercase;
+}
+
+.remote-sync-code-view__editor {
+  flex: 1 1 auto;
+  min-height: 0;
+}

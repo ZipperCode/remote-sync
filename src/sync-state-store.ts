@@ -1,4 +1,5 @@
 import { FileEntry, PreviousEntry } from "./sync-planner";
+import { canStoreMergeBase } from "./text-merge";
 
 export interface SyncStateStoreAdapter {
   read(): Promise<string | null>;
@@ -49,7 +50,8 @@ export class SyncStateStore {
     return this.state.previousEntries.map((entry) => ({
       path: entry.path,
       local: entry.local ? { ...entry.local } : undefined,
-      remote: entry.remote ? { ...entry.remote } : undefined
+      remote: entry.remote ? { ...entry.remote } : undefined,
+      mergeBase: entry.mergeBase ? { ...entry.mergeBase } : undefined
     }));
   }
 
@@ -57,19 +59,41 @@ export class SyncStateStore {
     return this.state.lastSyncTime;
   }
 
-  async saveSuccessfulSync(local: FileEntry[], remote: FileEntry[]): Promise<void> {
+  async saveSuccessfulSync(
+    local: FileEntry[],
+    remote: FileEntry[],
+    readTextContent?: (path: string) => Promise<string | undefined>
+  ): Promise<void> {
     const localMap = new Map(local.map((entry) => [entry.path, entry]));
     const remoteMap = new Map(remote.map((entry) => [entry.path, entry]));
     const paths = new Set<string>([...localMap.keys(), ...remoteMap.keys()]);
 
+    const previousEntries = await Promise.all(
+      [...paths].sort().map(async (path) => {
+        const localEntry = localMap.get(path);
+        const remoteEntry = remoteMap.get(path);
+        const mergeBase =
+          localEntry && remoteEntry && readTextContent && canStoreMergeBase(localEntry)
+            ? await readTextContent(path).then((content) =>
+                typeof content === "string"
+                  ? { source: "previous-sync-state" as const, content }
+                  : undefined
+              )
+            : undefined;
+
+        return {
+          path,
+          local: localEntry,
+          remote: remoteEntry,
+          mergeBase
+        };
+      })
+    );
+
     this.state = {
       version: 1,
       lastSyncTime: Date.now(),
-      previousEntries: [...paths].sort().map((path) => ({
-        path,
-        local: localMap.get(path),
-        remote: remoteMap.get(path)
-      }))
+      previousEntries
     };
 
     await this.adapter.write(JSON.stringify(this.state, null, 2));

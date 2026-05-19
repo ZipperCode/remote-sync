@@ -5,15 +5,23 @@ import {
   RemoteSyncSettingTab,
   RemoteSyncSettings
 } from "./settings";
+import {
+  CODE_VIEW_TYPE,
+  RemoteSyncCodeView,
+  SUPPORTED_CODE_EXTENSIONS
+} from "./src/code-file-view";
 import { AutoSyncController, AutoSyncRunResult } from "./src/auto-sync-controller";
 import { parseCustomHeaders } from "./src/custom-headers";
 import { ObsidianLocalStore } from "./src/local-store";
 import { S3Remote } from "./src/s3-remote";
 import { WebDavRemote } from "./src/webdav-remote";
-import { SyncEngine, SyncRemoteStore, SyncRunResult } from "./src/sync-engine";
+import { InitialSyncMode, SyncEngine, SyncRemoteStore, SyncRunResult } from "./src/sync-engine";
 import { SyncStateStore, SyncStateStoreAdapter } from "./src/sync-state-store";
 import { shouldIgnorePath } from "./src/path-utils";
 import { SyncConfirmation, SyncConfirmationDecision } from "./src/sync-planner";
+import { hasClipboardFiles, importClipboardFiles } from "./src/clipboard-files";
+import { BackupFileEntry, listLocalBackupFiles, restoreLocalBackupFile } from "./src/restore-backups";
+import type { Editor, MarkdownView } from "obsidian";
 
 interface PluginData {
   settings?: Partial<RemoteSyncSettings>;
@@ -36,7 +44,7 @@ class SyncConfirmationModal extends Modal {
     contentEl.empty();
     contentEl.createEl("h2", { text: "处理同步确认" });
     contentEl.createEl("p", {
-      text: "以下文件存在双方变更或删除冲突。请选择要保留的一侧，未处理的项目会保持待确认。"
+      text: "以下文件存在需要人工介入的冲突。可自动合并的文本文件会优先尝试自动合并。"
     });
 
     for (const confirmation of this.confirmations) {
@@ -48,6 +56,9 @@ class SyncConfirmationModal extends Modal {
         .setDesc(this.describeConfirmation(confirmation))
         .addDropdown((dropdown) => {
           dropdown.addOption("skip", "跳过");
+          if (confirmation.suggestedKind === "merge") {
+            dropdown.addOption("auto-merge", "自动合并");
+          }
           if (confirmation.local) {
             dropdown.addOption("use-local", "使用本地版本");
           }
@@ -64,6 +75,20 @@ class SyncConfirmationModal extends Modal {
     }
 
     new Setting(contentEl)
+      .addButton((button) =>
+        button
+          .setButtonText("接受所有远端删除")
+          .onClick(() => {
+            const decisions = this.confirmations.map((confirmation) => ({
+              path: confirmation.path,
+              action: this.isRemoteDeleteConfirmation(confirmation)
+                ? "accept-delete"
+                : this.decisions.get(confirmation.path) ?? "skip"
+            }));
+            this.close();
+            this.onSubmit(decisions);
+          })
+      )
       .addButton((button) =>
         button
           .setButtonText("全部跳过")
@@ -87,6 +112,9 @@ class SyncConfirmationModal extends Modal {
   }
 
   private defaultAction(confirmation: SyncConfirmation): SyncConfirmationDecision["action"] {
+    if (confirmation.suggestedKind === "merge") {
+      return "auto-merge";
+    }
     if (confirmation.suggestedKind === "upload") {
       return "use-local";
     }
@@ -96,18 +124,144 @@ class SyncConfirmationModal extends Modal {
     return "skip";
   }
 
+  private isRemoteDeleteConfirmation(confirmation: SyncConfirmation): boolean {
+    return Boolean(
+      confirmation.local &&
+      !confirmation.remote &&
+      (confirmation.reason === "remote-deleted" ||
+        confirmation.reason === "remote-deleted-local-changed")
+    );
+  }
+
   private describeConfirmation(confirmation: SyncConfirmation): string {
-    switch (confirmation.reason) {
-      case "both-changed":
-        return confirmation.suggestedKind === "upload"
-          ? "本地和远端都有变更，默认建议使用更新时间更新的本地版本。"
-          : "本地和远端都有变更，默认建议使用更新时间更新的远端版本。";
-      case "same-mtime-different-size":
-        return "本地和远端修改时间相同但文件大小不同，需要手动选择。";
-      case "local-deleted-remote-changed":
-        return "本地已删除，但远端在上次同步后发生变更。";
-      case "remote-deleted-local-changed":
-        return "远端已删除，但本地在上次同步后发生变更。";
+    switch (confirmation.conflictType) {
+      case "text-auto-merge":
+        return "文本文件有可用基线，已优先尝试自动三方合并。";
+      case "text-overlap":
+        return "本地和远端修改了相同内容区块，自动合并失败。";
+      case "text-no-base":
+        return confirmation.reason === "same-mtime-different-size"
+          ? "文本文件修改时间相同但大小不同，且没有可用基线，无法自动合并。"
+          : "文本文件没有可用基线，无法进行自动三方合并。";
+      case "text-too-large":
+        return confirmation.reason === "same-mtime-different-size"
+          ? "文本文件修改时间相同但大小不同，且文件过大，已降级为手动处理。"
+          : "文本文件过大，已降级为手动处理。";
+      case "binary":
+        return confirmation.reason === "same-mtime-different-size"
+          ? "非文本文件修改时间相同但大小不同，需要手动选择。"
+          : "非文本或不可安全合并的文件，需要手动选择。";
+      case "delete-vs-modify":
+        if (confirmation.reason === "local-deleted") {
+          return "本地删除了该文件。为避免误删远端文件，需要确认后才会同步删除。";
+        }
+        if (confirmation.reason === "remote-deleted") {
+          return "远端删除了该文件。为避免误删本地文件，需要确认后才会同步删除。";
+        }
+        return confirmation.reason === "local-deleted-remote-changed"
+          ? "本地已删除，但远端在上次同步后发生变更。"
+          : "远端已删除，但本地在上次同步后发生变更。";
+    }
+  }
+}
+
+class FirstSyncModal extends Modal {
+  constructor(
+    app: App,
+    private readonly onSelect: (mode: Exclude<InitialSyncMode, "ask">) => void
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "首次同步确认" });
+    contentEl.createEl("p", {
+      text: "当前库还没有成功同步基线。请选择首次同步策略，插件不会在未确认前写入或删除文件。"
+    });
+
+    new Setting(contentEl)
+      .setName("双向合并")
+      .setDesc("本地独有文件上传，远端独有文件下载；同路径差异文件进入确认。")
+      .addButton((button) =>
+        button
+          .setButtonText("双向合并")
+          .setCta()
+          .onClick(() => this.submit("merge"))
+      );
+
+    new Setting(contentEl)
+      .setName("以本地为准")
+      .setDesc("远端会被调整为当前本地库内容；远端独有文件会先备份再删除。")
+      .addButton((button) =>
+        button
+          .setButtonText("使用本地")
+          .onClick(() => this.submit("use-local"))
+      );
+
+    new Setting(contentEl)
+      .setName("以远端为准")
+      .setDesc("本地会被调整为当前远端内容；本地独有文件会先备份再删除。")
+      .addButton((button) =>
+        button
+          .setButtonText("使用远端")
+          .onClick(() => this.submit("use-remote"))
+      );
+  }
+
+  private submit(mode: Exclude<InitialSyncMode, "ask">): void {
+    this.close();
+    this.onSelect(mode);
+  }
+}
+
+class RestoreBackupModal extends Modal {
+  constructor(
+    app: App,
+    private readonly backups: BackupFileEntry[],
+    private readonly onRestore: (backup: BackupFileEntry) => void
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "恢复同步备份" });
+
+    if (this.backups.length === 0) {
+      contentEl.createEl("p", { text: "当前库没有可恢复的同步备份。" });
+      return;
+    }
+
+    contentEl.createEl("p", {
+      text: "选择一个备份恢复到原路径。若原路径已有文件，会被该备份覆盖。"
+    });
+
+    for (const backup of this.backups.slice(0, 100)) {
+      new Setting(contentEl)
+        .setName(backup.originalPath)
+        .setDesc(`批次：${backup.batch}；来源：${this.describeSource(backup)}；大小：${backup.size} bytes`)
+        .addButton((button) =>
+          button
+            .setButtonText("恢复")
+            .onClick(() => {
+              this.close();
+              this.onRestore(backup);
+            })
+        );
+    }
+  }
+
+  private describeSource(backup: BackupFileEntry): string {
+    switch (backup.source) {
+      case "local":
+        return "本地";
+      case "remote":
+        return "远端";
+      case "legacy":
+        return "旧版";
     }
   }
 }
@@ -120,6 +274,25 @@ export default class RemoteSyncPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
+
+    this.registerView(CODE_VIEW_TYPE, (leaf) => new RemoteSyncCodeView(leaf));
+    this.registerExtensions(SUPPORTED_CODE_EXTENSIONS, CODE_VIEW_TYPE);
+    this.registerEvent(
+      this.app.workspace.on(
+        "editor-paste",
+        (event: ClipboardEvent, editor: Editor, markdownView: MarkdownView) => {
+          const files = event.clipboardData?.files;
+          if (!files || !hasClipboardFiles(event)) {
+            return;
+          }
+
+          event.preventDefault();
+          void this.importPastedFiles(files, markdownView.file?.path ?? "", (links) => {
+            editor.replaceSelection(links.join("\n"));
+          });
+        }
+      )
+    );
 
     this.addRibbonIcon("refresh-cw", "同步远端仓库", () => {
       void this.syncNow();
@@ -141,6 +314,14 @@ export default class RemoteSyncPlugin extends Plugin {
       }
     });
 
+    this.addCommand({
+      id: "restore-sync-backup",
+      name: "恢复同步备份",
+      callback: () => {
+        this.openRestoreBackupModal();
+      }
+    });
+
     if (!Platform.isMobile) {
       this.statusBarItemEl = this.addStatusBarItem();
       this.updateStatus("空闲");
@@ -148,6 +329,23 @@ export default class RemoteSyncPlugin extends Plugin {
 
     this.addSettingTab(new RemoteSyncSettingTab(this.app, this));
     this.registerAutoSync();
+  }
+
+  private async importPastedFiles(
+    files: FileList,
+    sourcePath: string,
+    insertLinks: (links: string[]) => void
+  ): Promise<void> {
+    const links = await importClipboardFiles(this.app, files, sourcePath);
+    if (links.length === 0) {
+      return;
+    }
+
+    insertLinks(links);
+  }
+
+  async onunload(): Promise<void> {
+    this.app.workspace.detachLeavesOfType(CODE_VIEW_TYPE);
   }
 
   async loadSettings(): Promise<void> {
@@ -194,6 +392,7 @@ export default class RemoteSyncPlugin extends Plugin {
     showConfigNotice: boolean;
     confirmManually: boolean;
     confirmationDecisions?: SyncConfirmationDecision[];
+    initialSyncMode?: InitialSyncMode;
   }): Promise<boolean> {
     if (this.isSyncing) {
       if (options.showBusyNotice) {
@@ -215,8 +414,16 @@ export default class RemoteSyncPlugin extends Plugin {
     this.updateStatus("同步中...");
 
     try {
-      const result = await this.createEngine().syncOnce(options.confirmationDecisions);
+      const result = await this.createEngine().syncOnce(options.confirmationDecisions, {
+        initialSyncMode: options.initialSyncMode ?? "ask"
+      });
       this.handleSyncResult(result);
+      if (result.plan.initialSyncRequired) {
+        if (options.confirmManually) {
+          this.openFirstSyncModal();
+        }
+        return true;
+      }
       if (options.confirmManually && result.plan.confirmations.length > 0) {
         this.openConfirmationModal(result.plan.confirmations);
       }
@@ -239,6 +446,33 @@ export default class RemoteSyncPlugin extends Plugin {
         confirmationDecisions
       });
     }).open();
+  }
+
+  private openFirstSyncModal(): void {
+    new FirstSyncModal(this.app, (initialSyncMode) => {
+      void this.runSync({
+        showBusyNotice: true,
+        showConfigNotice: true,
+        confirmManually: true,
+        initialSyncMode
+      });
+    }).open();
+  }
+
+  private openRestoreBackupModal(): void {
+    const backups = listLocalBackupFiles(this.app);
+    new RestoreBackupModal(this.app, backups, (backup) => {
+      void this.restoreBackup(backup);
+    }).open();
+  }
+
+  private async restoreBackup(backup: BackupFileEntry): Promise<void> {
+    try {
+      await restoreLocalBackupFile(this.app, backup);
+      new Notice(`已恢复备份：${backup.originalPath}`);
+    } catch (error) {
+      new Notice(`恢复备份失败：${formatError(error)}`);
+    }
   }
 
   private registerAutoSync(): void {
@@ -320,20 +554,27 @@ export default class RemoteSyncPlugin extends Plugin {
   private handleSyncResult(result: SyncRunResult): void {
     const { summary } = result;
     const status =
-      summary.failures > 0 ? "失败" : summary.pendingConfirmations > 0 ? "待确认" : "成功";
+      summary.initialSyncRequired
+        ? "需首次确认"
+        : summary.failures > 0 ? "失败" : summary.pendingConfirmations > 0 ? "待确认" : "成功";
     this.updateStatus(`${status} ${new Date().toLocaleTimeString()}`);
 
     new Notice(
       [
         `同步${status}。`,
+        `首次同步待选择：${summary.initialSyncRequired ? 1 : 0}`,
         `上传：${summary.uploaded}`,
         `下载：${summary.downloaded}`,
+        `合并：${summary.merged}`,
         `本地删除：${summary.deletedLocal}`,
         `远程删除：${summary.deletedRemote}`,
         `已备份：${summary.backedUp}`,
         `已跳过：${summary.skipped}`,
         `待确认：${summary.pendingConfirmations}`,
-        `失败：${summary.failures}`
+        `失败：${summary.failures}`,
+        ...summary.failureDetails.slice(0, 5).map((failure) =>
+          `- ${failure.path}：${failure.stage}：${failure.message}`
+        )
       ].join("\n")
     );
   }

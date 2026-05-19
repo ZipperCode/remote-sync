@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { FileEntry, PreviousEntry, planSync } from "../src/sync-planner";
+import { MAX_MERGE_BASE_BYTES } from "../src/text-merge";
 
 const file = (
   path: string,
@@ -14,10 +15,16 @@ const file = (
   etag
 });
 
-const previous = (entry: FileEntry): PreviousEntry => ({
+const previous = (entry: FileEntry, baseContent?: string): PreviousEntry => ({
   path: entry.path,
   local: entry,
-  remote: entry
+  remote: entry,
+  mergeBase: baseContent
+    ? {
+        source: "previous-sync-state",
+        content: baseContent
+      }
+    : undefined
 });
 
 describe("SyncPlanner", () => {
@@ -33,7 +40,7 @@ describe("SyncPlanner", () => {
     expect(plan.conflicts).toEqual([]);
   });
 
-  test("deletes remote file when local deletion is detected", () => {
+  test("requires confirmation before deleting remote file when local deletion is detected", () => {
     const old = file("deleted.md", 100);
     const plan = planSync({
       local: [],
@@ -42,12 +49,17 @@ describe("SyncPlanner", () => {
       ignorePatterns: []
     });
 
-    expect(plan.operations).toEqual([
-      expect.objectContaining({ kind: "delete-remote", path: "deleted.md" })
+    expect(plan.operations).toEqual([]);
+    expect(plan.confirmations).toEqual([
+      expect.objectContaining({
+        path: "deleted.md",
+        reason: "local-deleted",
+        conflictType: "delete-vs-modify"
+      })
     ]);
   });
 
-  test("deletes local file when remote deletion is detected", () => {
+  test("requires confirmation before deleting local file when remote deletion is detected", () => {
     const old = file("deleted.md", 100);
     const plan = planSync({
       local: [old],
@@ -56,8 +68,70 @@ describe("SyncPlanner", () => {
       ignorePatterns: []
     });
 
-    expect(plan.operations).toEqual([
-      expect.objectContaining({ kind: "delete-local", path: "deleted.md" })
+    expect(plan.operations).toEqual([]);
+    expect(plan.confirmations).toEqual([
+      expect.objectContaining({
+        path: "deleted.md",
+        reason: "remote-deleted",
+        conflictType: "delete-vs-modify"
+      })
+    ]);
+  });
+
+  test("marks mergeable text conflicts as auto-merge candidates", () => {
+    const old = file("note.md", 100, 10);
+    const plan = planSync({
+      local: [file("note.md", 300, 12)],
+      remote: [file("note.md", 200, 12)],
+      previous: [previous(old, "base\n")],
+      ignorePatterns: []
+    });
+
+    expect(plan.operations).toEqual([]);
+    expect(plan.confirmations).toEqual([
+      expect.objectContaining({
+        path: "note.md",
+        reason: "both-changed",
+        conflictType: "text-auto-merge",
+        suggestedKind: "merge"
+      })
+    ]);
+  });
+
+  test("downgrades oversized text conflicts to manual review", () => {
+    const old = file("big.md", 100, 10);
+    const plan = planSync({
+      local: [file("big.md", 300, MAX_MERGE_BASE_BYTES + 1)],
+      remote: [file("big.md", 200, MAX_MERGE_BASE_BYTES + 1)],
+      previous: [previous(old, "base\n")],
+      ignorePatterns: []
+    });
+
+    expect(plan.operations).toEqual([]);
+    expect(plan.confirmations).toEqual([
+      expect.objectContaining({
+        path: "big.md",
+        reason: "both-changed",
+        conflictType: "text-too-large"
+      })
+    ]);
+  });
+
+  test("keeps binary conflicts manual", () => {
+    const old = file("image.png", 100, 10);
+    const plan = planSync({
+      local: [file("image.png", 300, 12)],
+      remote: [file("image.png", 200, 12)],
+      previous: [previous(old)],
+      ignorePatterns: []
+    });
+
+    expect(plan.operations).toEqual([]);
+    expect(plan.confirmations).toEqual([
+      expect.objectContaining({
+        path: "image.png",
+        conflictType: "binary"
+      })
     ]);
   });
 
@@ -75,7 +149,26 @@ describe("SyncPlanner", () => {
       expect.objectContaining({
         path: "note.md",
         reason: "both-changed",
-        suggestedKind: "upload"
+        conflictType: "text-no-base"
+      })
+    ]);
+  });
+
+  test("marks delete-vs-modify conflicts for manual resolution", () => {
+    const old = file("deleted.md", 100, 10);
+    const plan = planSync({
+      local: [file("deleted.md", 300, 12)],
+      remote: [],
+      previous: [previous(old)],
+      ignorePatterns: []
+    });
+
+    expect(plan.operations).toEqual([]);
+    expect(plan.confirmations).toEqual([
+      expect.objectContaining({
+        path: "deleted.md",
+        reason: "remote-deleted-local-changed",
+        conflictType: "delete-vs-modify"
       })
     ]);
   });
@@ -91,7 +184,11 @@ describe("SyncPlanner", () => {
 
     expect(plan.operations).toEqual([]);
     expect(plan.confirmations).toEqual([
-      expect.objectContaining({ path: "note.md", reason: "same-mtime-different-size" })
+      expect.objectContaining({
+        path: "note.md",
+        reason: "same-mtime-different-size",
+        conflictType: "text-no-base"
+      })
     ]);
   });
 
@@ -138,7 +235,6 @@ describe("SyncPlanner", () => {
       "dist/keep.js"
     ]);
     expect(plan.skipped.map((entry) => entry.path).sort()).toEqual([
-      ".remote-sync-trash/20260518/old.md",
       "Notes/draft.md",
       "dist/app.js"
     ]);

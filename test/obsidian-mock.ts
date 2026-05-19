@@ -6,3 +6,4 @@ export const Platform = { isMobile: false };
 export class Plugin {}
 export class PluginSettingTab {}
 export class Setting {}
+export class TextFileView {}

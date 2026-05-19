@@ -75,6 +75,11 @@ export function shouldIgnorePath(
   return matchesIgnoreRules(normalized, customPatterns);
 }
 
+export function isRemoteSyncTrashPath(path: string): boolean {
+  const normalized = normalizeVaultPath(path);
+  return normalized === REMOTE_SYNC_TRASH_DIR || normalized.startsWith(`${REMOTE_SYNC_TRASH_DIR}/`);
+}
+
 export function parentPath(path: string): string {
   const normalized = normalizeVaultPath(path);
   const lastSlash = normalized.lastIndexOf("/");

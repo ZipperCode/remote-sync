@@ -14,10 +14,10 @@ class MemoryAdapter implements SyncStateStoreAdapter {
   }
 }
 
-const entry = (path: string, mtime: number): FileEntry => ({
+const entry = (path: string, mtime: number, size = 1): FileEntry => ({
   path,
   type: "file",
-  size: 1,
+  size,
   mtime
 });
 
@@ -29,15 +29,46 @@ describe("SyncStateStore", () => {
     await store.load();
     expect(store.getPreviousEntries()).toEqual([]);
 
-    await store.saveSuccessfulSync([entry("a.md", 100)], [entry("a.md", 110)]);
+    await store.saveSuccessfulSync(
+      [entry("a.md", 100, 10)],
+      [entry("a.md", 110, 10)],
+      async () => "merged body"
+    );
 
     const reloaded = new SyncStateStore(adapter);
     await reloaded.load();
 
     expect(reloaded.getPreviousEntries()).toEqual([
-      expect.objectContaining({ path: "a.md" })
+      expect.objectContaining({
+        path: "a.md",
+        mergeBase: {
+          source: "previous-sync-state",
+          content: "merged body"
+        }
+      })
     ]);
     expect(reloaded.getLastSyncTime()).toBeGreaterThan(0);
+  });
+
+  test("does not store merge bases for oversized text files", async () => {
+    const adapter = new MemoryAdapter();
+    const store = new SyncStateStore(adapter);
+
+    await store.saveSuccessfulSync(
+      [entry("large.md", 100, 70000)],
+      [entry("large.md", 100, 70000)],
+      async () => "should not be used"
+    );
+
+    const reloaded = new SyncStateStore(adapter);
+    await reloaded.load();
+
+    expect(reloaded.getPreviousEntries()).toEqual([
+      expect.objectContaining({
+        path: "large.md",
+        mergeBase: undefined
+      })
+    ]);
   });
 
   test("loads legacy array state for forward compatibility", async () => {
