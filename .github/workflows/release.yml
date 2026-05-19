@@ -1,0 +1,109 @@
+name: Release Obsidian plugin
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Build and package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build plugin
+        run: npm run build
+
+      - name: Validate release metadata
+        id: metadata
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+
+          const packageJson = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
+          const versions = JSON.parse(fs.readFileSync("versions.json", "utf8"));
+
+          if (packageJson.version !== manifest.version) {
+            throw new Error(`package.json version ${packageJson.version} does not match manifest.json version ${manifest.version}`);
+          }
+
+          if (versions[manifest.version] !== manifest.minAppVersion) {
+            throw new Error(`versions.json must map ${manifest.version} to ${manifest.minAppVersion}`);
+          }
+
+          for (const file of ["manifest.json", "main.js", "styles.css"]) {
+            if (!fs.existsSync(file)) {
+              throw new Error(`Missing release file: ${file}`);
+            }
+          }
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${manifest.version}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `plugin_id=${manifest.id}\n`);
+          NODE
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" != "v$(node -p 'require("./manifest.json").version')" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} must match manifest version v$(node -p 'require("./manifest.json").version')" >&2
+            exit 1
+          fi
+
+      - name: Prepare release package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp manifest.json main.js styles.css versions.json dist/
+          cd dist
+          zip -r "../${{ steps.metadata.outputs.plugin_id }}-${{ steps.metadata.outputs.version }}.zip" manifest.json main.js styles.css versions.json
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.metadata.outputs.plugin_id }}-${{ steps.metadata.outputs.version }}
+          path: |
+            dist/manifest.json
+            dist/main.js
+            dist/styles.css
+            dist/versions.json
+            ${{ steps.metadata.outputs.plugin_id }}-${{ steps.metadata.outputs.version }}.zip
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          PACKAGE_NAME: ${{ steps.metadata.outputs.plugin_id }}-${{ steps.metadata.outputs.version }}.zip
+        shell: bash
+        run: |
+          assets=(
+            "${PACKAGE_NAME}"
+            "dist/manifest.json"
+            "dist/main.js"
+            "dist/styles.css"
+            "dist/versions.json"
+          )
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" "${assets[@]}" --clobber
+          else
+            gh release create "${RELEASE_TAG}" "${assets[@]}" --title "${RELEASE_TAG}" --generate-notes
+          fi

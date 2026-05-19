@@ -404,6 +404,11 @@ export default class RemoteSyncPlugin extends Plugin {
     try {
       this.assertConfigured();
     } catch (error) {
+      console.warn("[Remote Sync] Sync skipped because configuration is invalid.", {
+        provider: this.settings.provider,
+        isSyncing: this.isSyncing,
+        error
+      });
       if (options.showConfigNotice) {
         new Notice(formatError(error));
       }
@@ -429,6 +434,12 @@ export default class RemoteSyncPlugin extends Plugin {
       }
     } catch (error) {
       this.updateStatus("同步失败");
+      console.error("[Remote Sync] Sync failed.", {
+        provider: this.settings.provider,
+        isSyncing: this.isSyncing,
+        options,
+        error
+      });
       new Notice(`同步失败：${formatError(error)}`);
     } finally {
       this.isSyncing = false;
@@ -558,6 +569,13 @@ export default class RemoteSyncPlugin extends Plugin {
         ? "需首次确认"
         : summary.failures > 0 ? "失败" : summary.pendingConfirmations > 0 ? "待确认" : "成功";
     this.updateStatus(`${status} ${new Date().toLocaleTimeString()}`);
+
+    if (summary.failures > 0) {
+      console.warn("[Remote Sync] Sync completed with file failures.", {
+        summary,
+        failureDetails: summary.failureDetails
+      });
+    }
 
     new Notice(
       [

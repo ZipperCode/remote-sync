@@ -534,6 +534,11 @@ export class SyncEngine {
     try {
       return await action();
     } catch (error) {
+      console.error("[Remote Sync] Sync stage failed.", {
+        path,
+        stage,
+        error
+      });
       throw new SyncOperationFailure({
         path,
         stage,

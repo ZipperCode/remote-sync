@@ -72,7 +72,14 @@ export class ObsidianLocalStore implements SyncLocalStore {
     for (const segment of splitPath(parent)) {
       current = current ? `${current}/${segment}` : segment;
       if (!this.app.vault.getFolderByPath(current)) {
-        await this.app.vault.createFolder(current);
+        try {
+          await this.app.vault.createFolder(current);
+        } catch (error) {
+          if (error instanceof Error && error.message === "Folder already exists.") {
+            continue;
+          }
+          throw error;
+        }
       }
     }
   }
