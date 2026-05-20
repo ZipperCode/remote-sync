@@ -1,4 +1,4 @@
-import { App, Modal, Notice, Platform, Plugin, Setting, TAbstractFile } from "obsidian";
+import { App, Modal, Notice, Platform, Plugin, Setting, TAbstractFile, requestUrl } from "obsidian";
 import {
   DEFAULT_SETTINGS,
   normalizeRemoteSyncSettings,
@@ -21,6 +21,7 @@ import { shouldIgnorePath } from "./src/path-utils";
 import { SyncConfirmation, SyncConfirmationDecision } from "./src/sync-planner";
 import { hasClipboardFiles, importClipboardFiles } from "./src/clipboard-files";
 import { BackupFileEntry, listLocalBackupFiles, restoreLocalBackupFile } from "./src/restore-backups";
+import { applyPluginUpdate, checkForPluginUpdate, type PluginFileAdapter } from "./src/plugin-updater";
 import type { Editor, MarkdownView } from "obsidian";
 
 interface PluginData {
@@ -271,6 +272,7 @@ export default class RemoteSyncPlugin extends Plugin {
   private statusBarItemEl: HTMLElement | null = null;
   private autoSyncController: AutoSyncController | null = null;
   private isSyncing = false;
+  private isUpdatingPlugin = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -322,6 +324,14 @@ export default class RemoteSyncPlugin extends Plugin {
       }
     });
 
+    this.addCommand({
+      id: "check-plugin-update",
+      name: "检查插件更新",
+      callback: () => {
+        void this.checkPluginUpdates();
+      }
+    });
+
     if (!Platform.isMobile) {
       this.statusBarItemEl = this.addStatusBarItem();
       this.updateStatus("空闲");
@@ -364,6 +374,45 @@ export default class RemoteSyncPlugin extends Plugin {
   async testConnection(): Promise<void> {
     this.assertConfigured();
     await this.createRemote().testConnection();
+  }
+
+  async checkPluginUpdates(): Promise<void> {
+    if (this.isUpdatingPlugin) {
+      new Notice("插件更新正在进行中。");
+      return;
+    }
+
+    this.isUpdatingPlugin = true;
+    try {
+      const result = await checkForPluginUpdate({
+        currentVersion: this.manifest.version,
+        pluginId: this.manifest.id,
+        request: requestUrl
+      });
+      if (result.status === "up-to-date") {
+        new Notice("当前已是最新版本。");
+        return;
+      }
+
+      const pluginDir = `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+      await applyPluginUpdate({
+        pluginDir,
+        release: result.release,
+        adapter: this.app.vault.adapter as PluginFileAdapter
+      });
+      new Notice(`插件已更新到 ${result.release.version}，请重启 Obsidian 或手动重载插件。`);
+    } catch (error) {
+      console.error("[Remote Sync] Plugin update check failed.", {
+        error
+      });
+      new Notice(`检查插件更新失败：${formatError(error)}`);
+    } finally {
+      this.isUpdatingPlugin = false;
+    }
+  }
+
+  isPluginUpdateInProgress(): boolean {
+    return this.isUpdatingPlugin;
   }
 
   async syncNow(): Promise<void> {

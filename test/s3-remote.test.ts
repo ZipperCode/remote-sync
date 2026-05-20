@@ -93,6 +93,37 @@ describe("S3-compatible remote", () => {
     ]);
   });
 
+  test("ignores directory placeholder objects in ListObjectsV2 XML", () => {
+    const entries = parseListObjectsV2(
+      `<?xml version="1.0"?>
+      <ListBucketResult>
+        <Contents>
+          <Key>vault/99-归档/</Key>
+          <LastModified>2026-05-18T01:02:03.000Z</LastModified>
+          <ETag>"placeholder"</ETag>
+          <Size>0</Size>
+        </Contents>
+        <Contents>
+          <Key>vault/99-归档/note.md</Key>
+          <LastModified>2026-05-18T01:02:04.000Z</LastModified>
+          <ETag>"file"</ETag>
+          <Size>12</Size>
+        </Contents>
+      </ListBucketResult>`,
+      "vault"
+    );
+
+    expect(entries).toEqual([
+      {
+        path: "99-归档/note.md",
+        type: "file",
+        mtime: Date.parse("2026-05-18T01:02:04.000Z"),
+        size: 12,
+        etag: "file"
+      }
+    ]);
+  });
+
   test("GET, PUT, DELETE, and list requests use expected methods, URLs, and headers", async () => {
     vi.mocked(requestUrl).mockResolvedValue({
       status: 200,

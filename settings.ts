@@ -246,6 +246,22 @@ export class RemoteSyncSettingTab extends PluginSettingTab {
             void this.plugin.syncNow();
           })
       );
+
+    new Setting(containerEl).setName("插件更新").setHeading();
+
+    new Setting(containerEl)
+      .setName("当前版本")
+      .setDesc(`当前插件版本：${this.plugin.manifest.version}`)
+      .addButton((button) => {
+        button
+          .setButtonText(this.plugin.isPluginUpdateInProgress() ? "更新中..." : "检查并更新")
+          .setDisabled(this.plugin.isPluginUpdateInProgress())
+          .onClick(async () => {
+            this.display();
+            await this.plugin.checkPluginUpdates();
+            this.display();
+          });
+      });
   }
 
   private displayWebDavSettings(containerEl: HTMLElement): void {

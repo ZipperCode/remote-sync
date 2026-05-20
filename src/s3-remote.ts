@@ -231,6 +231,11 @@ function parseListObjectsV2Result(xml: string, prefix: string): ListObjectsV2Res
       if (!key || (prefixWithSlash && !key.startsWith(prefixWithSlash))) {
         return null;
       }
+      // S3-compatible services may list directory placeholder objects like "folder/".
+      // Obsidian 只同步文件，不能把这类占位对象当成真实文件下载。
+      if (key.endsWith("/")) {
+        return null;
+      }
 
       const path = normalizeVaultPath(prefixWithSlash ? key.slice(prefixWithSlash.length) : key);
       if (!path) {
