@@ -1,11 +1,11 @@
 import { requestUrl, RequestUrlResponse } from "obsidian";
 import { withTimeout } from "./with-timeout";
 import { mergeCustomHeaders } from "./custom-headers";
-
-export const WEBDAV_REQUEST_TIMEOUT_MS = 30000;
 import { parentPath, splitPath, normalizeRemoteRoot, normalizeVaultPath } from "./path-utils";
 import { SyncRemoteStore } from "./sync-engine";
 import { FileEntry } from "./sync-planner";
+
+export const WEBDAV_REQUEST_TIMEOUT_MS = 30000;
 
 export interface WebDavRemoteOptions {
   baseUrl: string;
