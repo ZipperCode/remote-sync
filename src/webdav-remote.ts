@@ -1,8 +1,11 @@
 import { requestUrl, RequestUrlResponse } from "obsidian";
+import { withTimeout } from "./with-timeout";
 import { mergeCustomHeaders } from "./custom-headers";
 import { parentPath, splitPath, normalizeRemoteRoot, normalizeVaultPath } from "./path-utils";
 import { SyncRemoteStore } from "./sync-engine";
 import { FileEntry } from "./sync-planner";
+
+export const WEBDAV_REQUEST_TIMEOUT_MS = 30000;
 
 export interface WebDavRemoteOptions {
   baseUrl: string;
@@ -115,16 +118,20 @@ export class WebDavRemote implements SyncRemoteStore {
     body?: string | ArrayBuffer,
     extraHeaders: Record<string, string> = {}
   ): Promise<RequestUrlResponse> {
-    return requestUrl({
-      url: this.buildUrl(path),
-      method,
-      body,
-      headers: mergeCustomHeaders(this.options.customHeaders ?? {}, {
-        ...this.authHeaders(),
-        ...extraHeaders
+    return withTimeout(
+      requestUrl({
+        url: this.buildUrl(path),
+        method,
+        body,
+        headers: mergeCustomHeaders(this.options.customHeaders ?? {}, {
+          ...this.authHeaders(),
+          ...extraHeaders
+        }),
+        throw: false
       }),
-      throw: false
-    });
+      WEBDAV_REQUEST_TIMEOUT_MS,
+      `WebDAV ${method} ${path}`
+    );
   }
 
   private buildUrl(path: string): string {

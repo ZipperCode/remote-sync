@@ -3,6 +3,9 @@ import { mergeCustomHeaders } from "./custom-headers";
 import { normalizeVaultPath, splitPath } from "./path-utils";
 import { SyncRemoteStore } from "./sync-engine";
 import { FileEntry } from "./sync-planner";
+import { withTimeout } from "./with-timeout";
+
+export const S3_REQUEST_TIMEOUT_MS = 30000;
 
 export type S3Preset = "aws" | "r2" | "custom";
 export type S3AddressingStyle = "path" | "virtual-hosted";
@@ -104,13 +107,17 @@ export class S3Remote implements SyncRemoteStore {
     });
     const signedHeaders = await signS3Request(this.options, { method, url, headers, body });
 
-    return requestUrl({
-      url,
-      method,
-      body,
-      headers: signedHeaders,
-      throw: false
-    });
+    return withTimeout(
+      requestUrl({
+        url,
+        method,
+        body,
+        headers: signedHeaders,
+        throw: false
+      }),
+      S3_REQUEST_TIMEOUT_MS,
+      `S3 ${method} ${path}`
+    );
   }
 
   private assertOk(response: RequestUrlResponse, okStatuses: number[], action: string): void {

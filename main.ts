@@ -24,9 +24,13 @@ import { BackupFileEntry, listLocalBackupFiles, restoreLocalBackupFile } from ".
 import { applyPluginUpdate, checkForPluginUpdate, type PluginFileAdapter } from "./src/plugin-updater";
 import type { Editor, MarkdownView } from "obsidian";
 
+const STALE_SYNC_THRESHOLD_MS = 2 * 60 * 1000;
+const AUTO_SYNC_POLL_INTERVAL_MS = 5 * 60 * 1000;
+
 interface PluginData {
   settings?: Partial<RemoteSyncSettings>;
   syncState?: unknown;
+  deviceId?: string;
 }
 
 class SyncConfirmationModal extends Modal {
@@ -270,12 +274,15 @@ class RestoreBackupModal extends Modal {
 export default class RemoteSyncPlugin extends Plugin {
   settings: RemoteSyncSettings = { ...DEFAULT_SETTINGS };
   private statusBarItemEl: HTMLElement | null = null;
+  private deviceId = "";
   private autoSyncController: AutoSyncController | null = null;
-  private isSyncing = false;
+  private syncStartedAt: number | null = null;
   private isUpdatingPlugin = false;
+  private lastSyncLabel = "空闲";
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    await this.ensureDeviceId();
 
     this.registerView(CODE_VIEW_TYPE, (leaf) => new RemoteSyncCodeView(leaf));
     this.registerExtensions(SUPPORTED_CODE_EXTENSIONS, CODE_VIEW_TYPE);
@@ -424,7 +431,7 @@ export default class RemoteSyncPlugin extends Plugin {
   }
 
   private async syncAutomatically(): Promise<AutoSyncRunResult> {
-    if (this.isSyncing) {
+    if (this.syncStartedAt !== null && Date.now() - this.syncStartedAt < STALE_SYNC_THRESHOLD_MS) {
       return "busy";
     }
 
@@ -443,11 +450,19 @@ export default class RemoteSyncPlugin extends Plugin {
     confirmationDecisions?: SyncConfirmationDecision[];
     initialSyncMode?: InitialSyncMode;
   }): Promise<boolean> {
-    if (this.isSyncing) {
-      if (options.showBusyNotice) {
-        new Notice("同步正在进行中。");
+    if (this.syncStartedAt !== null) {
+      const elapsed = Date.now() - this.syncStartedAt;
+      if (elapsed < STALE_SYNC_THRESHOLD_MS) {
+        if (options.showBusyNotice) {
+          new Notice("同步正在进行中。");
+        }
+        return false;
       }
-      return false;
+      console.warn("[Remote Sync] Detected a stale sync, forcing reset.", {
+        elapsedMs: elapsed,
+        threshold: STALE_SYNC_THRESHOLD_MS
+      });
+      this.syncStartedAt = null;
     }
 
     try {
@@ -455,7 +470,7 @@ export default class RemoteSyncPlugin extends Plugin {
     } catch (error) {
       console.warn("[Remote Sync] Sync skipped because configuration is invalid.", {
         provider: this.settings.provider,
-        isSyncing: this.isSyncing,
+        syncStartedAt: this.syncStartedAt,
         error
       });
       if (options.showConfigNotice) {
@@ -464,7 +479,8 @@ export default class RemoteSyncPlugin extends Plugin {
       return false;
     }
 
-    this.isSyncing = true;
+    const syncToken = Date.now();
+    this.syncStartedAt = syncToken;
     this.updateStatus("同步中...");
 
     try {
@@ -485,13 +501,19 @@ export default class RemoteSyncPlugin extends Plugin {
       this.updateStatus("同步失败");
       console.error("[Remote Sync] Sync failed.", {
         provider: this.settings.provider,
-        isSyncing: this.isSyncing,
+        syncStartedAt: this.syncStartedAt,
         options,
         error
       });
       new Notice(`同步失败：${formatError(error)}`);
     } finally {
-      this.isSyncing = false;
+      // Only clear the lock if it still belongs to this invocation.
+      // A zombie recovery may have started a new sync (with a different
+      // syncToken) while this stale call was still running; in that case
+      // we must not clobber the new lock.
+      if (this.syncStartedAt === syncToken) {
+        this.syncStartedAt = null;
+      }
     }
 
     return true;
@@ -539,7 +561,15 @@ export default class RemoteSyncPlugin extends Plugin {
     this.autoSyncController = new AutoSyncController({
       sync: () => this.syncAutomatically(),
       shouldIgnorePath: (path) =>
-        shouldIgnorePath(path, this.settings.ignorePatterns, this.manifest.id)
+        shouldIgnorePath(path, this.settings.ignorePatterns, this.manifest.id),
+      onPendingChange: (pendingCount) => {
+        if (this.syncStartedAt !== null) {
+          return;
+        }
+        this.updateStatus(
+          pendingCount > 0 ? `待同步 ${pendingCount} 个变更` : this.lastSyncLabel
+        );
+      }
     });
     this.register(() => this.autoSyncController?.dispose());
 
@@ -569,6 +599,16 @@ export default class RemoteSyncPlugin extends Plugin {
           controller.handleVaultRename(file.path, oldPath);
         })
       );
+
+      // 启动同步：拉取其它设备在本设备离线期间的远端改动
+      void this.syncAutomatically();
+
+      // 定时轮询：补齐"本地无文件事件但远端已变"的漏感知场景
+      this.registerInterval(
+        window.setInterval(() => {
+          void this.syncAutomatically();
+        }, AUTO_SYNC_POLL_INTERVAL_MS)
+      );
     });
   }
 
@@ -582,7 +622,8 @@ export default class RemoteSyncPlugin extends Plugin {
         pluginId: this.manifest.id,
         syncSafetyMode: this.settings.syncSafetyMode,
         maxAutoDeleteRatio: this.settings.maxAutoDeleteRatio,
-        nonMergeableConflictPolicy: this.settings.nonMergeableConflictPolicy
+        nonMergeableConflictPolicy: this.settings.nonMergeableConflictPolicy,
+        deviceId: this.deviceId
       }
     );
   }
@@ -620,7 +661,8 @@ export default class RemoteSyncPlugin extends Plugin {
       summary.initialSyncRequired
         ? "需首次确认"
         : summary.failures > 0 ? "失败" : summary.pendingConfirmations > 0 ? "待确认" : "成功";
-    this.updateStatus(`${status} ${new Date().toLocaleTimeString()}`);
+    this.lastSyncLabel = `${status} ${new Date().toLocaleTimeString()}`;
+    this.updateStatus(this.lastSyncLabel);
 
     if (summary.failures > 0) {
       console.warn("[Remote Sync] Sync completed with file failures.", {
@@ -679,6 +721,21 @@ export default class RemoteSyncPlugin extends Plugin {
 
   private async readPluginData(): Promise<PluginData> {
     return ((await this.loadData()) as PluginData | null) ?? {};
+  }
+
+  private async ensureDeviceId(): Promise<string> {
+    if (this.deviceId) {
+      return this.deviceId;
+    }
+    const data = await this.readPluginData();
+    if (typeof data.deviceId === "string" && data.deviceId.length > 0) {
+      this.deviceId = data.deviceId;
+      return this.deviceId;
+    }
+    const generated = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    this.deviceId = generated;
+    await this.saveData({ ...data, deviceId: generated });
+    return generated;
   }
 }
 

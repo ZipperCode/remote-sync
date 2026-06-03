@@ -10,6 +10,7 @@ import { SyncStateStore } from "./sync-state-store";
 import { normalizeVaultPath, REMOTE_SYNC_TRASH_DIR, shouldIgnorePath } from "./path-utils";
 import { NonMergeableConflictPolicy, SyncConfirmationAction, SyncSafetyMode } from "./sync-types";
 import { decodeTextContent, encodeTextContent, mergeTextContent } from "./text-merge";
+import { buildConflictCopyPath } from "./device-id";
 
 export type InitialSyncMode = "ask" | "merge" | "use-local" | "use-remote";
 
@@ -37,6 +38,7 @@ export interface SyncEngineOptions {
   syncSafetyMode?: SyncSafetyMode;
   maxAutoDeleteRatio?: number;
   nonMergeableConflictPolicy?: NonMergeableConflictPolicy;
+  deviceId?: string;
 }
 
 export interface SyncSummary {
@@ -440,7 +442,11 @@ export class SyncEngine {
         );
 
         if (!mergeResult.ok) {
-          throw new AutoMergeConflictError();
+          return await this.resolveUnmergeableTextConflict(
+            operation,
+            remoteContent,
+            trashBatch
+          );
         }
 
         let backups = 0;
@@ -527,6 +533,53 @@ export class SyncEngine {
       size,
       mtime: Math.max(operation.local?.mtime ?? 0, operation.remote?.mtime ?? 0)
     };
+  }
+
+  private async resolveUnmergeableTextConflict(
+    operation: SyncOperation,
+    remoteContent: ArrayBuffer,
+    trashBatch: string
+  ): Promise<number> {
+    if (!operation.local || !operation.remote) {
+      throw new AutoMergeConflictError();
+    }
+
+    // 远端原内容先备份到隐藏 trash 目录（兜底，防止任何后续步骤异常导致内容不可达）
+    let backups = 0;
+    backups += await this.backupRemoteFileToLocal(operation.path, operation.remote, trashBatch);
+
+    // 把远端版本另存为用户可见的 conflict 副本。
+    // 关键：副本必须同时写入本地和远端，否则下次同步时副本是 local-only 文件，
+    // 会被 planLocalOnly 在 balanced 模式下判定为 remote-deleted 而删除。
+    // 两端都写后，下次同步副本两端一致、previous 齐全，稳定收敛，且对端用户也能看到冲突。
+    const conflictPath = buildConflictCopyPath(
+      operation.path,
+      this.options.deviceId ?? "device",
+      operation.remote.mtime
+    );
+    const conflictEntry: FileEntry = {
+      path: conflictPath,
+      type: "file",
+      size: remoteContent.byteLength,
+      mtime: operation.remote.mtime
+    };
+    await this.runStage(conflictPath, "merge", () =>
+      Promise.all([
+        this.local.writeFile(conflictPath, remoteContent, conflictEntry),
+        this.remote.writeFile(conflictPath, remoteContent, conflictEntry)
+      ])
+    );
+
+    // 本地版本视为权威，上传覆盖远端原文件（远端原内容此时已落入副本和 trash，覆盖是安全的）。
+    // 若此步失败：state 不保存，下次同步会重做本次收尾（副本路径含固定的 remote.mtime，幂等覆盖同名副本，不累积）。
+    const localContent = await this.runStage(operation.path, "upload", () =>
+      this.local.readFile(operation.path)
+    );
+    await this.runStage(operation.path, "upload", () =>
+      this.remote.writeFile(operation.path, localContent, operation.local)
+    );
+
+    return backups;
   }
 
   private recordFailure(
