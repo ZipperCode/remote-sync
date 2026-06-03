@@ -560,7 +560,15 @@ export default class RemoteSyncPlugin extends Plugin {
     this.autoSyncController = new AutoSyncController({
       sync: () => this.syncAutomatically(),
       shouldIgnorePath: (path) =>
-        shouldIgnorePath(path, this.settings.ignorePatterns, this.manifest.id)
+        shouldIgnorePath(path, this.settings.ignorePatterns, this.manifest.id),
+      onPendingChange: (pendingCount) => {
+        if (this.syncStartedAt !== null) {
+          return;
+        }
+        if (pendingCount > 0) {
+          this.updateStatus(`待同步 ${pendingCount} 个变更`);
+        }
+      }
     });
     this.register(() => this.autoSyncController?.dispose());
 

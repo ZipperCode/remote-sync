@@ -6,6 +6,7 @@ export interface AutoSyncControllerOptions {
   sync: () => Promise<void | AutoSyncRunResult>;
   shouldIgnorePath: (path: string) => boolean;
   debounceMs?: number;
+  onPendingChange?: (pendingCount: number) => void;
 }
 
 export class AutoSyncController {
@@ -13,6 +14,7 @@ export class AutoSyncController {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private syncInProgress = false;
   private pendingAfterCurrentSync = false;
+  private pendingPaths = new Set<string>();
 
   constructor(private readonly options: AutoSyncControllerOptions) {
     this.debounceMs = options.debounceMs ?? AUTO_SYNC_DEBOUNCE_MS;
@@ -23,6 +25,8 @@ export class AutoSyncController {
       return;
     }
 
+    this.pendingPaths.add(path);
+    this.options.onPendingChange?.(this.pendingPaths.size);
     this.requestSync();
   }
 
@@ -31,6 +35,8 @@ export class AutoSyncController {
       return;
     }
 
+    this.pendingPaths.add(path);
+    this.options.onPendingChange?.(this.pendingPaths.size);
     this.requestSync();
   }
 
@@ -62,6 +68,8 @@ export class AutoSyncController {
     }
 
     this.syncInProgress = true;
+    this.pendingPaths.clear();
+    this.options.onPendingChange?.(0);
     let retryAfterCurrentSync = false;
     try {
       const result = await this.options.sync();
