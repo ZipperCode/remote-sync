@@ -24,6 +24,8 @@ import { BackupFileEntry, listLocalBackupFiles, restoreLocalBackupFile } from ".
 import { applyPluginUpdate, checkForPluginUpdate, type PluginFileAdapter } from "./src/plugin-updater";
 import type { Editor, MarkdownView } from "obsidian";
 
+const STALE_SYNC_THRESHOLD_MS = 2 * 60 * 1000;
+
 interface PluginData {
   settings?: Partial<RemoteSyncSettings>;
   syncState?: unknown;
@@ -271,7 +273,7 @@ export default class RemoteSyncPlugin extends Plugin {
   settings: RemoteSyncSettings = { ...DEFAULT_SETTINGS };
   private statusBarItemEl: HTMLElement | null = null;
   private autoSyncController: AutoSyncController | null = null;
-  private isSyncing = false;
+  private syncStartedAt: number | null = null;
   private isUpdatingPlugin = false;
 
   async onload(): Promise<void> {
@@ -424,7 +426,7 @@ export default class RemoteSyncPlugin extends Plugin {
   }
 
   private async syncAutomatically(): Promise<AutoSyncRunResult> {
-    if (this.isSyncing) {
+    if (this.syncStartedAt !== null && Date.now() - this.syncStartedAt < STALE_SYNC_THRESHOLD_MS) {
       return "busy";
     }
 
@@ -443,11 +445,19 @@ export default class RemoteSyncPlugin extends Plugin {
     confirmationDecisions?: SyncConfirmationDecision[];
     initialSyncMode?: InitialSyncMode;
   }): Promise<boolean> {
-    if (this.isSyncing) {
-      if (options.showBusyNotice) {
-        new Notice("同步正在进行中。");
+    if (this.syncStartedAt !== null) {
+      const elapsed = Date.now() - this.syncStartedAt;
+      if (elapsed < STALE_SYNC_THRESHOLD_MS) {
+        if (options.showBusyNotice) {
+          new Notice("同步正在进行中。");
+        }
+        return false;
       }
-      return false;
+      console.warn("[Remote Sync] Detected a stale sync, forcing reset.", {
+        elapsedMs: elapsed,
+        threshold: STALE_SYNC_THRESHOLD_MS
+      });
+      this.syncStartedAt = null;
     }
 
     try {
@@ -455,7 +465,7 @@ export default class RemoteSyncPlugin extends Plugin {
     } catch (error) {
       console.warn("[Remote Sync] Sync skipped because configuration is invalid.", {
         provider: this.settings.provider,
-        isSyncing: this.isSyncing,
+        syncStartedAt: this.syncStartedAt,
         error
       });
       if (options.showConfigNotice) {
@@ -464,7 +474,7 @@ export default class RemoteSyncPlugin extends Plugin {
       return false;
     }
 
-    this.isSyncing = true;
+    this.syncStartedAt = Date.now();
     this.updateStatus("同步中...");
 
     try {
@@ -485,13 +495,13 @@ export default class RemoteSyncPlugin extends Plugin {
       this.updateStatus("同步失败");
       console.error("[Remote Sync] Sync failed.", {
         provider: this.settings.provider,
-        isSyncing: this.isSyncing,
+        syncStartedAt: this.syncStartedAt,
         options,
         error
       });
       new Notice(`同步失败：${formatError(error)}`);
     } finally {
-      this.isSyncing = false;
+      this.syncStartedAt = null;
     }
 
     return true;
