@@ -10,6 +10,7 @@ import { SyncStateStore } from "./sync-state-store";
 import { normalizeVaultPath, REMOTE_SYNC_TRASH_DIR, shouldIgnorePath } from "./path-utils";
 import { NonMergeableConflictPolicy, SyncConfirmationAction, SyncSafetyMode } from "./sync-types";
 import { decodeTextContent, encodeTextContent, mergeTextContent } from "./text-merge";
+import { buildConflictCopyPath } from "./device-id";
 
 export type InitialSyncMode = "ask" | "merge" | "use-local" | "use-remote";
 
@@ -37,6 +38,7 @@ export interface SyncEngineOptions {
   syncSafetyMode?: SyncSafetyMode;
   maxAutoDeleteRatio?: number;
   nonMergeableConflictPolicy?: NonMergeableConflictPolicy;
+  deviceId?: string;
 }
 
 export interface SyncSummary {
@@ -440,7 +442,11 @@ export class SyncEngine {
         );
 
         if (!mergeResult.ok) {
-          throw new AutoMergeConflictError();
+          return await this.resolveUnmergeableTextConflict(
+            operation,
+            remoteContent,
+            trashBatch
+          );
         }
 
         let backups = 0;
@@ -527,6 +533,43 @@ export class SyncEngine {
       size,
       mtime: Math.max(operation.local?.mtime ?? 0, operation.remote?.mtime ?? 0)
     };
+  }
+
+  private async resolveUnmergeableTextConflict(
+    operation: SyncOperation,
+    remoteContent: ArrayBuffer,
+    trashBatch: string
+  ): Promise<number> {
+    if (!operation.local || !operation.remote) {
+      throw new AutoMergeConflictError();
+    }
+
+    let backups = 0;
+    backups += await this.backupRemoteFileToLocal(operation.path, operation.remote, trashBatch);
+
+    const conflictPath = buildConflictCopyPath(
+      operation.path,
+      this.options.deviceId ?? "device",
+      operation.remote.mtime
+    );
+    const conflictEntry: FileEntry = {
+      path: conflictPath,
+      type: "file",
+      size: remoteContent.byteLength,
+      mtime: operation.remote.mtime
+    };
+    await this.runStage(conflictPath, "merge", () =>
+      this.local.writeFile(conflictPath, remoteContent, conflictEntry)
+    );
+
+    const localContent = await this.runStage(operation.path, "upload", () =>
+      this.local.readFile(operation.path)
+    );
+    await this.runStage(operation.path, "upload", () =>
+      this.remote.writeFile(operation.path, localContent, operation.local)
+    );
+
+    return backups;
   }
 
   private recordFailure(

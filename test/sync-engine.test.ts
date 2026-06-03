@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import { SyncEngine, SyncLocalStore, SyncRemoteStore } from "../src/sync-engine";
 import { FileEntry, PreviousEntry } from "../src/sync-planner";
 import { SyncStateStore, SyncStateStoreAdapter } from "../src/sync-state-store";
+import { encodeTextContent } from "../src/text-merge";
 
 class MemoryAdapter implements SyncStateStoreAdapter {
   value: string | null;
@@ -464,7 +465,7 @@ describe("SyncEngine", () => {
     expect(local.written).not.toContain("note.md");
   });
 
-  test("keeps overlapping text edits pending for manual resolution", async () => {
+  test("resolves overlapping text edits by saving a conflict copy and advancing state", async () => {
     const old = file("note.md", 100, 12);
     const adapter = new MemoryAdapter(
       JSON.stringify({ version: 1, lastSyncTime: 123, previousEntries: [previous(old, "base\nsame\n")] })
@@ -473,19 +474,22 @@ describe("SyncEngine", () => {
     const local = new FakeStore([file("note.md", 300, 17)], { "note.md": "base\nlocal\n" });
     const remote = new FakeStore([file("note.md", 200, 18)], { "note.md": "base\nremote\n" });
     const before = adapter.value;
-    const engine = new SyncEngine(local, remote, stateStore, { ignorePatterns: [] });
+    const engine = new SyncEngine(local, remote, stateStore, {
+      ignorePatterns: [],
+      deviceId: "tester"
+    });
 
     const result = await engine.syncOnce();
 
-    expect(result.summary.merged).toBe(0);
+    // 重叠冲突不再死循环：无未决确认、无失败
+    expect(result.summary.pendingConfirmations).toBe(0);
     expect(result.summary.failures).toBe(0);
-    expect(result.summary.pendingConfirmations).toBe(1);
-    expect(result.plan.confirmations).toEqual([
-      expect.objectContaining({ path: "note.md", conflictType: "text-overlap" })
-    ]);
-    expect(local.written).not.toContain("note.md");
-    expect(remote.written).not.toContain("note.md");
-    expect(adapter.value).toBe(before);
+    // 本地权威版本被上传覆盖远端
+    expect(remote.written).toContain("note.md");
+    // 生成了一个冲突副本（落在本地）
+    expect(local.written.some((path) => path.includes(".conflict-tester-"))).toBe(true);
+    // state 正常推进（不再卡住）
+    expect(adapter.value).not.toBe(before);
   });
 
   test("does not update sync state when merge write steps fail", async () => {
@@ -537,5 +541,94 @@ describe("SyncEngine", () => {
     expect(remote.written.some((path) => path.startsWith(".remote-sync-trash/"))).toBe(false);
     expect(remote.written).toContain("note.md");
     expect(adapter.value).toContain("note.md");
+  });
+});
+
+function entry(path: string, content: string, mtime: number): FileEntry {
+  return { path, type: "file", size: encodeTextContent(content).byteLength, mtime };
+}
+
+class MemoryStore implements SyncLocalStore, SyncRemoteStore {
+  files = new Map<string, { content: string; mtime: number }>();
+
+  constructor(initial: Record<string, { content: string; mtime: number }> = {}) {
+    for (const [path, value] of Object.entries(initial)) {
+      this.files.set(path, value);
+    }
+  }
+
+  async snapshot(): Promise<FileEntry[]> {
+    return [...this.files.entries()].map(([path, v]) => entry(path, v.content, v.mtime));
+  }
+  async readFile(path: string): Promise<ArrayBuffer> {
+    const v = this.files.get(path);
+    if (!v) throw new Error(`missing ${path}`);
+    return encodeTextContent(v.content);
+  }
+  async writeFile(path: string, content: ArrayBuffer): Promise<void> {
+    this.files.set(path, {
+      content: new TextDecoder().decode(new Uint8Array(content)),
+      mtime: 1
+    });
+  }
+  async deleteFile(path: string): Promise<void> {
+    this.files.delete(path);
+  }
+}
+
+class MemoryStateAdapter implements SyncStateStoreAdapter {
+  value: string | null;
+  constructor(value: string | null) {
+    this.value = value;
+  }
+  async read(): Promise<string | null> {
+    return this.value;
+  }
+  async write(value: string): Promise<void> {
+    this.value = value;
+  }
+}
+
+describe("SyncEngine text-overlap conflict resolution", () => {
+  test("on unmergeable text conflict: saves remote as conflict copy, keeps local, advances state", async () => {
+    const base = "line1\nline2\n";
+    const localContent = "line1\nLOCAL\n";
+    const remoteContent = "line1\nREMOTE\n";
+
+    const previousState = JSON.stringify({
+      version: 1,
+      lastSyncTime: 1000,
+      previousEntries: [
+        {
+          path: "note.md",
+          local: entry("note.md", base, 1000),
+          remote: entry("note.md", base, 1000),
+          mergeBase: { source: "previous-sync-state", content: base }
+        }
+      ]
+    });
+
+    const local = new MemoryStore({ "note.md": { content: localContent, mtime: 2000 } });
+    const remote = new MemoryStore({ "note.md": { content: remoteContent, mtime: 3000 } });
+    const stateStore = new SyncStateStore(new MemoryStateAdapter(previousState));
+
+    const engine = new SyncEngine(local, remote, stateStore, {
+      ignorePatterns: [],
+      syncSafetyMode: "balanced",
+      deviceId: "laptop"
+    });
+
+    const result = await engine.syncOnce([]);
+
+    expect(result.summary.pendingConfirmations).toBe(0);
+    expect(result.summary.failures).toBe(0);
+
+    expect(local.files.get("note.md")?.content).toBe(localContent);
+
+    const conflictKeys = [...local.files.keys()].filter((k) => k.includes(".conflict-laptop-"));
+    expect(conflictKeys).toHaveLength(1);
+    expect(local.files.get(conflictKeys[0])?.content).toBe(remoteContent);
+
+    expect(remote.files.get("note.md")?.content).toBe(localContent);
   });
 });
