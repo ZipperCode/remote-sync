@@ -1,9 +1,12 @@
 export function sanitizeDeviceId(value: string): string {
-  return value
-    .trim()
-    .replace(/[^a-zA-Z0-9_-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 32) || "device";
+  return (
+    value
+      .trim()
+      .replace(/[^a-zA-Z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 32)
+      .replace(/-+$/, "") || "device"
+  );
 }
 
 export function buildConflictCopyPath(
