@@ -43,4 +43,13 @@ describe("withTimeout", () => {
     await withTimeout(Promise.resolve(42), 1000, "op");
     expect(clearSpy).toHaveBeenCalled();
   });
+
+  test("clears the timer when the source promise rejects", async () => {
+    vi.useFakeTimers();
+    const clearSpy = vi.spyOn(globalThis, "clearTimeout");
+    await expect(
+      withTimeout(Promise.reject(new Error("boom")), 1000, "op")
+    ).rejects.toThrow("boom");
+    expect(clearSpy).toHaveBeenCalled();
+  });
 });
