@@ -29,6 +29,7 @@ const STALE_SYNC_THRESHOLD_MS = 2 * 60 * 1000;
 interface PluginData {
   settings?: Partial<RemoteSyncSettings>;
   syncState?: unknown;
+  deviceId?: string;
 }
 
 class SyncConfirmationModal extends Modal {
@@ -272,12 +273,14 @@ class RestoreBackupModal extends Modal {
 export default class RemoteSyncPlugin extends Plugin {
   settings: RemoteSyncSettings = { ...DEFAULT_SETTINGS };
   private statusBarItemEl: HTMLElement | null = null;
+  private deviceId = "";
   private autoSyncController: AutoSyncController | null = null;
   private syncStartedAt: number | null = null;
   private isUpdatingPlugin = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    await this.ensureDeviceId();
 
     this.registerView(CODE_VIEW_TYPE, (leaf) => new RemoteSyncCodeView(leaf));
     this.registerExtensions(SUPPORTED_CODE_EXTENSIONS, CODE_VIEW_TYPE);
@@ -599,7 +602,8 @@ export default class RemoteSyncPlugin extends Plugin {
         pluginId: this.manifest.id,
         syncSafetyMode: this.settings.syncSafetyMode,
         maxAutoDeleteRatio: this.settings.maxAutoDeleteRatio,
-        nonMergeableConflictPolicy: this.settings.nonMergeableConflictPolicy
+        nonMergeableConflictPolicy: this.settings.nonMergeableConflictPolicy,
+        deviceId: this.deviceId
       }
     );
   }
@@ -696,6 +700,21 @@ export default class RemoteSyncPlugin extends Plugin {
 
   private async readPluginData(): Promise<PluginData> {
     return ((await this.loadData()) as PluginData | null) ?? {};
+  }
+
+  private async ensureDeviceId(): Promise<string> {
+    if (this.deviceId) {
+      return this.deviceId;
+    }
+    const data = await this.readPluginData();
+    if (typeof data.deviceId === "string" && data.deviceId.length > 0) {
+      this.deviceId = data.deviceId;
+      return this.deviceId;
+    }
+    const generated = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    this.deviceId = generated;
+    await this.saveData({ ...data, deviceId: generated });
+    return generated;
   }
 }
 

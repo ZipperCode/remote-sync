@@ -34,6 +34,7 @@ describe("RemoteSyncPlugin", () => {
         }
       },
       loadData: vi.fn(async () => ({ settings: {} })),
+      saveData: vi.fn(async () => {}),
       registerView: vi.fn(),
       registerExtensions: vi.fn(),
       registerEvent: vi.fn(),
