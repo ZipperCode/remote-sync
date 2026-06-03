@@ -474,7 +474,8 @@ export default class RemoteSyncPlugin extends Plugin {
       return false;
     }
 
-    this.syncStartedAt = Date.now();
+    const syncToken = Date.now();
+    this.syncStartedAt = syncToken;
     this.updateStatus("同步中...");
 
     try {
@@ -501,7 +502,13 @@ export default class RemoteSyncPlugin extends Plugin {
       });
       new Notice(`同步失败：${formatError(error)}`);
     } finally {
-      this.syncStartedAt = null;
+      // Only clear the lock if it still belongs to this invocation.
+      // A zombie recovery may have started a new sync (with a different
+      // syncToken) while this stale call was still running; in that case
+      // we must not clobber the new lock.
+      if (this.syncStartedAt === syncToken) {
+        this.syncStartedAt = null;
+      }
     }
 
     return true;
