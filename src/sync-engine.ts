@@ -544,9 +544,14 @@ export class SyncEngine {
       throw new AutoMergeConflictError();
     }
 
+    // 远端原内容先备份到隐藏 trash 目录（兜底，防止任何后续步骤异常导致内容不可达）
     let backups = 0;
     backups += await this.backupRemoteFileToLocal(operation.path, operation.remote, trashBatch);
 
+    // 把远端版本另存为用户可见的 conflict 副本。
+    // 关键：副本必须同时写入本地和远端，否则下次同步时副本是 local-only 文件，
+    // 会被 planLocalOnly 在 balanced 模式下判定为 remote-deleted 而删除。
+    // 两端都写后，下次同步副本两端一致、previous 齐全，稳定收敛，且对端用户也能看到冲突。
     const conflictPath = buildConflictCopyPath(
       operation.path,
       this.options.deviceId ?? "device",
@@ -559,9 +564,14 @@ export class SyncEngine {
       mtime: operation.remote.mtime
     };
     await this.runStage(conflictPath, "merge", () =>
-      this.local.writeFile(conflictPath, remoteContent, conflictEntry)
+      Promise.all([
+        this.local.writeFile(conflictPath, remoteContent, conflictEntry),
+        this.remote.writeFile(conflictPath, remoteContent, conflictEntry)
+      ])
     );
 
+    // 本地版本视为权威，上传覆盖远端原文件（远端原内容此时已落入副本和 trash，覆盖是安全的）。
+    // 若此步失败：state 不保存，下次同步会重做本次收尾（副本路径含固定的 remote.mtime，幂等覆盖同名副本，不累积）。
     const localContent = await this.runStage(operation.path, "upload", () =>
       this.local.readFile(operation.path)
     );

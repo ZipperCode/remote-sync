@@ -630,5 +630,51 @@ describe("SyncEngine text-overlap conflict resolution", () => {
     expect(local.files.get(conflictKeys[0])?.content).toBe(remoteContent);
 
     expect(remote.files.get("note.md")?.content).toBe(localContent);
+
+    // 副本也写到了远端（防止下次同步被当 local-only 删除，并让对端用户看到冲突）
+    const remoteConflictKeys = [...remote.files.keys()].filter((k) => k.includes(".conflict-laptop-"));
+    expect(remoteConflictKeys).toHaveLength(1);
+    expect(remote.files.get(remoteConflictKeys[0])?.content).toBe(remoteContent);
+  });
+
+  test("conflict copy survives a second sync cycle (not deleted as local-only)", async () => {
+    const base = "line1\nline2\n";
+    const localContent = "line1\nLOCAL\n";
+    const remoteContent = "line1\nREMOTE\n";
+
+    const previousState = JSON.stringify({
+      version: 1,
+      lastSyncTime: 1000,
+      previousEntries: [
+        {
+          path: "note.md",
+          local: entry("note.md", base, 1000),
+          remote: entry("note.md", base, 1000),
+          mergeBase: { source: "previous-sync-state", content: base }
+        }
+      ]
+    });
+
+    const local = new MemoryStore({ "note.md": { content: localContent, mtime: 2000 } });
+    const remote = new MemoryStore({ "note.md": { content: remoteContent, mtime: 3000 } });
+    const stateStore = new SyncStateStore(new MemoryStateAdapter(previousState));
+    const engine = new SyncEngine(local, remote, stateStore, {
+      ignorePatterns: [],
+      syncSafetyMode: "balanced",
+      deviceId: "laptop"
+    });
+
+    // 第一次同步：收尾冲突，生成副本（两端）
+    await engine.syncOnce([]);
+    const conflictKeysAfterFirst = [...local.files.keys()].filter((k) => k.includes(".conflict-laptop-"));
+    expect(conflictKeysAfterFirst).toHaveLength(1);
+    const conflictPath = conflictKeysAfterFirst[0];
+
+    // 第二次同步：副本两端一致、previous 齐全，不应被删除
+    const second = await engine.syncOnce([]);
+    expect(second.summary.deletedLocal).toBe(0);
+    expect(second.summary.deletedRemote).toBe(0);
+    expect(local.files.has(conflictPath)).toBe(true);
+    expect(remote.files.has(conflictPath)).toBe(true);
   });
 });
