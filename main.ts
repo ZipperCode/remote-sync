@@ -25,6 +25,7 @@ import { applyPluginUpdate, checkForPluginUpdate, type PluginFileAdapter } from 
 import type { Editor, MarkdownView } from "obsidian";
 
 const STALE_SYNC_THRESHOLD_MS = 2 * 60 * 1000;
+const AUTO_SYNC_POLL_INTERVAL_MS = 5 * 60 * 1000;
 
 interface PluginData {
   settings?: Partial<RemoteSyncSettings>;
@@ -588,6 +589,16 @@ export default class RemoteSyncPlugin extends Plugin {
         this.app.vault.on("rename", (file: TAbstractFile, oldPath: string) => {
           controller.handleVaultRename(file.path, oldPath);
         })
+      );
+
+      // 启动同步：拉取其它设备在本设备离线期间的远端改动
+      void this.syncAutomatically();
+
+      // 定时轮询：补齐"本地无文件事件但远端已变"的漏感知场景
+      this.registerInterval(
+        window.setInterval(() => {
+          void this.syncAutomatically();
+        }, AUTO_SYNC_POLL_INTERVAL_MS)
       );
     });
   }
