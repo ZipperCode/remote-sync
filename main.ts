@@ -278,6 +278,7 @@ export default class RemoteSyncPlugin extends Plugin {
   private autoSyncController: AutoSyncController | null = null;
   private syncStartedAt: number | null = null;
   private isUpdatingPlugin = false;
+  private lastSyncLabel = "空闲";
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -565,9 +566,9 @@ export default class RemoteSyncPlugin extends Plugin {
         if (this.syncStartedAt !== null) {
           return;
         }
-        if (pendingCount > 0) {
-          this.updateStatus(`待同步 ${pendingCount} 个变更`);
-        }
+        this.updateStatus(
+          pendingCount > 0 ? `待同步 ${pendingCount} 个变更` : this.lastSyncLabel
+        );
       }
     });
     this.register(() => this.autoSyncController?.dispose());
@@ -660,7 +661,8 @@ export default class RemoteSyncPlugin extends Plugin {
       summary.initialSyncRequired
         ? "需首次确认"
         : summary.failures > 0 ? "失败" : summary.pendingConfirmations > 0 ? "待确认" : "成功";
-    this.updateStatus(`${status} ${new Date().toLocaleTimeString()}`);
+    this.lastSyncLabel = `${status} ${new Date().toLocaleTimeString()}`;
+    this.updateStatus(this.lastSyncLabel);
 
     if (summary.failures > 0) {
       console.warn("[Remote Sync] Sync completed with file failures.", {
