@@ -25,7 +25,9 @@ import { applyPluginUpdate, checkForPluginUpdate, type PluginFileAdapter } from 
 import type { Editor, MarkdownView } from "obsidian";
 
 const STALE_SYNC_THRESHOLD_MS = 2 * 60 * 1000;
-const AUTO_SYNC_POLL_INTERVAL_MS = 5 * 60 * 1000;
+// 轮询周期略大于 stale 阈值：让"判定僵死"先于"下一轮轮询触发"，避免一次接近
+// 2 分钟的慢同步在自然完成的同一时刻被下一轮误判为僵死而接管，语义更清晰。
+const AUTO_SYNC_POLL_INTERVAL_MS = 150 * 1000;
 
 interface PluginData {
   settings?: Partial<RemoteSyncSettings>;
@@ -35,11 +37,23 @@ interface PluginData {
 
 class SyncConfirmationModal extends Modal {
   private readonly decisions = new Map<string, SyncConfirmationDecision["action"]>();
+  private submitted = false;
+  // Per-path dropdown components so bulk buttons can refresh the visible value
+  // after programmatically changing a decision.
+  private readonly dropdowns = new Map<string, { setValue: (v: string) => unknown }>();
 
   constructor(
     app: App,
     private readonly confirmations: SyncConfirmation[],
-    private readonly onSubmit: (decisions: SyncConfirmationDecision[]) => void
+    private readonly onSubmit: (decisions: SyncConfirmationDecision[]) => void,
+    // Fired only when the user closed the modal without making any decision
+    // (X / Esc / "全部跳过"); used to degrade automatic confirmation prompts.
+    private readonly onDismissWithoutSubmit?: () => void,
+    // Fired on EVERY close path (submit / skip / passive dismiss / Esc),
+    // independent of `submitted`; used to release the open guard so the modal
+    // can be reopened later. Decoupling guard release from `submitted` prevents
+    // the guard from getting stuck on (and blocking all future modals).
+    private readonly onClosed?: () => void
   ) {
     super(app);
   }
@@ -52,31 +66,82 @@ class SyncConfirmationModal extends Modal {
       text: "以下文件存在需要人工介入的冲突。可自动合并的文本文件会优先尝试自动合并。"
     });
 
+    // Group confirmations by coarse conflict category so users can resolve a
+    // whole category (e.g. dozens of deletions) with one click.
+    const groups: Array<{ key: "delete" | "text" | "binary"; title: string; items: SyncConfirmation[] }> = [
+      { key: "delete", title: "删除类冲突", items: [] },
+      { key: "text", title: "文本类冲突", items: [] },
+      { key: "binary", title: "二进制/其它冲突", items: [] }
+    ];
     for (const confirmation of this.confirmations) {
-      const defaultAction = this.defaultAction(confirmation);
-      this.decisions.set(confirmation.path, defaultAction);
+      const group = groups.find((g) => g.key === this.groupOf(confirmation));
+      group?.items.push(confirmation);
+    }
 
-      new Setting(contentEl)
-        .setName(confirmation.path)
-        .setDesc(this.describeConfirmation(confirmation))
-        .addDropdown((dropdown) => {
-          dropdown.addOption("skip", "跳过");
-          if (confirmation.suggestedKind === "merge") {
-            dropdown.addOption("auto-merge", "自动合并");
-          }
-          if (confirmation.local) {
-            dropdown.addOption("use-local", "使用本地版本");
-          }
-          if (confirmation.remote) {
-            dropdown.addOption("use-remote", "使用远端版本");
-          }
-          if ((confirmation.local && !confirmation.remote) || (confirmation.remote && !confirmation.local)) {
-            dropdown.addOption("accept-delete", "接受删除");
-          }
-          dropdown.setValue(defaultAction).onChange((value) => {
-            this.decisions.set(confirmation.path, value as SyncConfirmationDecision["action"]);
+    for (const group of groups) {
+      if (group.items.length === 0) {
+        continue;
+      }
+      contentEl.createEl("h3", { text: `${group.title}（${group.items.length}）` });
+
+      // Bulk-action row for this group.
+      const bulkRow = new Setting(contentEl).setName("批量处理本组");
+      if (group.key === "delete") {
+        bulkRow
+          .addButton((b) => b.setButtonText("全部接受删除").onClick(() =>
+            this.submitWith(group.items, () => "accept-delete")))
+          .addButton((b) => b.setButtonText("全部保留").onClick(() =>
+            this.submitWith(group.items, (c) => (c.local ? "use-local" : "use-remote"))))
+          .addButton((b) => b.setButtonText("全组跳过").onClick(() =>
+            this.submitWith(group.items, () => "skip")));
+      } else if (group.key === "text") {
+        bulkRow
+          .addButton((b) => b.setButtonText("全部自动合并").onClick(() =>
+            this.submitWith(group.items, (c) => (c.suggestedKind === "merge" ? "auto-merge" : this.decisions.get(c.path) ?? "skip"))))
+          .addButton((b) => b.setButtonText("全部用本地").onClick(() =>
+            this.submitWith(group.items, () => "use-local")))
+          .addButton((b) => b.setButtonText("全部用远端").onClick(() =>
+            this.submitWith(group.items, () => "use-remote")))
+          .addButton((b) => b.setButtonText("全组跳过").onClick(() =>
+            this.submitWith(group.items, () => "skip")));
+      } else {
+        bulkRow
+          .addButton((b) => b.setButtonText("全部用本地").onClick(() =>
+            this.submitWith(group.items, () => "use-local")))
+          .addButton((b) => b.setButtonText("全部用远端").onClick(() =>
+            this.submitWith(group.items, () => "use-remote")))
+          .addButton((b) => b.setButtonText("全组跳过").onClick(() =>
+            this.submitWith(group.items, () => "skip")));
+      }
+
+      // Per-item dropdowns (unchanged behaviour, finer control).
+      for (const confirmation of group.items) {
+        const defaultAction = this.defaultAction(confirmation);
+        this.decisions.set(confirmation.path, defaultAction);
+
+        new Setting(contentEl)
+          .setName(confirmation.path)
+          .setDesc(this.describeConfirmation(confirmation))
+          .addDropdown((dropdown) => {
+            dropdown.addOption("skip", "跳过");
+            if (confirmation.suggestedKind === "merge") {
+              dropdown.addOption("auto-merge", "自动合并");
+            }
+            if (confirmation.local) {
+              dropdown.addOption("use-local", "使用本地版本");
+            }
+            if (confirmation.remote) {
+              dropdown.addOption("use-remote", "使用远端版本");
+            }
+            if ((confirmation.local && !confirmation.remote) || (confirmation.remote && !confirmation.local)) {
+              dropdown.addOption("accept-delete", "接受删除");
+            }
+            dropdown.setValue(defaultAction).onChange((value) => {
+              this.decisions.set(confirmation.path, value as SyncConfirmationDecision["action"]);
+            });
+            this.dropdowns.set(confirmation.path, dropdown);
           });
-        });
+      }
     }
 
     new Setting(contentEl)
@@ -90,6 +155,7 @@ class SyncConfirmationModal extends Modal {
                 ? "accept-delete"
                 : this.decisions.get(confirmation.path) ?? "skip"
             }));
+            this.submitted = true;
             this.close();
             this.onSubmit(decisions);
           })
@@ -98,6 +164,12 @@ class SyncConfirmationModal extends Modal {
         button
           .setButtonText("全部跳过")
           .onClick(() => {
+            // "全部跳过" = skip this round AND quiet down: degrade automatic
+            // prompts to a status-bar hint instead of re-popping every poll.
+            // Deliberately leave `submitted` false so onClose runs the dismiss
+            // path (sets autoConfirmationDismissed=true). The always-on onClosed
+            // callback still releases the open guard, so this active click does
+            // NOT lock out future modals.
             this.close();
           })
       )
@@ -110,10 +182,51 @@ class SyncConfirmationModal extends Modal {
               path: confirmation.path,
               action: this.decisions.get(confirmation.path) ?? "skip"
             }));
+            this.submitted = true;
             this.close();
             this.onSubmit(decisions);
           })
       );
+  }
+
+  onClose(): void {
+    if (!this.submitted) {
+      this.onDismissWithoutSubmit?.();
+    }
+    // Always release the guard, regardless of why the modal closed.
+    this.onClosed?.();
+    this.contentEl.empty();
+  }
+
+  private groupOf(confirmation: SyncConfirmation): "delete" | "text" | "binary" {
+    if (confirmation.conflictType === "delete-vs-modify") {
+      return "delete";
+    }
+    if (confirmation.conflictType === "binary") {
+      return "binary";
+    }
+    return "text";
+  }
+
+  // Apply a bulk decision to a group, refresh the visible dropdowns, then submit
+  // immediately (the user explicitly chose a one-click bulk action). Decisions
+  // for paths outside the group keep whatever the per-item dropdowns hold.
+  private submitWith(
+    items: SyncConfirmation[],
+    pick: (confirmation: SyncConfirmation) => SyncConfirmationDecision["action"]
+  ): void {
+    for (const confirmation of items) {
+      const action = pick(confirmation);
+      this.decisions.set(confirmation.path, action);
+      this.dropdowns.get(confirmation.path)?.setValue(action);
+    }
+    const decisions = this.confirmations.map((confirmation) => ({
+      path: confirmation.path,
+      action: this.decisions.get(confirmation.path) ?? "skip"
+    }));
+    this.submitted = true;
+    this.close();
+    this.onSubmit(decisions);
   }
 
   private defaultAction(confirmation: SyncConfirmation): SyncConfirmationDecision["action"] {
@@ -279,6 +392,8 @@ export default class RemoteSyncPlugin extends Plugin {
   private syncStartedAt: number | null = null;
   private isUpdatingPlugin = false;
   private lastSyncLabel = "空闲";
+  private confirmationModalOpen = false;
+  private autoConfirmationDismissed = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -336,6 +451,14 @@ export default class RemoteSyncPlugin extends Plugin {
       name: "检查插件更新",
       callback: () => {
         void this.checkPluginUpdates();
+      }
+    });
+
+    this.addCommand({
+      id: "reset-sync-state",
+      name: "重置同步状态",
+      callback: () => {
+        this.resetSyncState();
       }
     });
 
@@ -430,6 +553,14 @@ export default class RemoteSyncPlugin extends Plugin {
     await this.runSync({ showBusyNotice: true, showConfigNotice: true, confirmManually: true });
   }
 
+  resetSyncState(): void {
+    // Force-release a stuck sync lock so a hung request (that never timed out)
+    // can no longer block manual syncs, then immediately retry.
+    this.syncStartedAt = null;
+    new Notice("已重置同步状态，正在重新同步…");
+    void this.syncNow();
+  }
+
   private async syncAutomatically(): Promise<AutoSyncRunResult> {
     if (this.syncStartedAt !== null && Date.now() - this.syncStartedAt < STALE_SYNC_THRESHOLD_MS) {
       return "busy";
@@ -438,7 +569,8 @@ export default class RemoteSyncPlugin extends Plugin {
     const didRun = await this.runSync({
       showBusyNotice: false,
       showConfigNotice: false,
-      confirmManually: false
+      confirmManually: true,
+      autoConfirm: true
     });
     return didRun ? "completed" : "skipped";
   }
@@ -447,6 +579,7 @@ export default class RemoteSyncPlugin extends Plugin {
     showBusyNotice: boolean;
     showConfigNotice: boolean;
     confirmManually: boolean;
+    autoConfirm?: boolean;
     confirmationDecisions?: SyncConfirmationDecision[];
     initialSyncMode?: InitialSyncMode;
   }): Promise<boolean> {
@@ -484,8 +617,12 @@ export default class RemoteSyncPlugin extends Plugin {
     this.updateStatus("同步中...");
 
     try {
+      // 取出本批待处理的重命名映射（取出即清空），透传给引擎在远端执行搬迁，
+      // 避免重命名被拆成「删旧+增新」而误判为删除冲突。手动与自动同步都经此处。
+      const renames = this.autoSyncController?.takePendingRenames() ?? [];
       const result = await this.createEngine().syncOnce(options.confirmationDecisions, {
-        initialSyncMode: options.initialSyncMode ?? "ask"
+        initialSyncMode: options.initialSyncMode ?? "ask",
+        renames
       });
       this.handleSyncResult(result);
       if (result.plan.initialSyncRequired) {
@@ -495,7 +632,25 @@ export default class RemoteSyncPlugin extends Plugin {
         return true;
       }
       if (options.confirmManually && result.plan.confirmations.length > 0) {
-        this.openConfirmationModal(result.plan.confirmations);
+        if (options.autoConfirm) {
+          // Automatic sync: if the user already dismissed a confirmation modal
+          // without acting on it, stop re-opening it on every poll and degrade
+          // to a status-bar hint instead so they can dismiss it for good.
+          if (this.autoConfirmationDismissed) {
+            // Persist the guidance into lastSyncLabel so a later vault change
+            // (onPendingChange, which falls back to lastSyncLabel when the
+            // pending count is 0) cannot overwrite this "how to resolve" hint.
+            this.lastSyncLabel = `待确认 ${result.plan.confirmations.length} 个，点击同步处理`;
+            this.updateStatus(this.lastSyncLabel);
+          } else {
+            this.openConfirmationModal(result.plan.confirmations);
+          }
+        } else {
+          // Manual entry points always open the modal and clear the degraded
+          // state, since the user explicitly came to deal with the conflicts.
+          this.autoConfirmationDismissed = false;
+          this.openConfirmationModal(result.plan.confirmations);
+        }
       }
     } catch (error) {
       this.updateStatus("同步失败");
@@ -520,14 +675,40 @@ export default class RemoteSyncPlugin extends Plugin {
   }
 
   private openConfirmationModal(confirmations: SyncConfirmation[]): void {
-    new SyncConfirmationModal(this.app, confirmations, (confirmationDecisions) => {
-      void this.runSync({
-        showBusyNotice: true,
-        showConfigNotice: true,
-        confirmManually: false,
-        confirmationDecisions
-      });
-    }).open();
+    if (this.confirmationModalOpen) {
+      return;
+    }
+    // Set the guard synchronously before opening so concurrent attempts are
+    // blocked regardless of when the Modal's onOpen callback fires.
+    this.confirmationModalOpen = true;
+    new SyncConfirmationModal(
+      this.app,
+      confirmations,
+      (confirmationDecisions) => {
+        // The user submitted a decision, so the conflicts are actually being
+        // handled and the degraded auto-confirmation state can be cleared.
+        // (Guard release is handled by onClosed below, which always runs.)
+        this.autoConfirmationDismissed = false;
+        void this.runSync({
+          showBusyNotice: true,
+          showConfigNotice: true,
+          confirmManually: false,
+          confirmationDecisions
+        });
+      },
+      () => {
+        // The user closed the modal without acting on it (X / Esc / "全部跳过").
+        // Remember the dismissal so automatic syncs degrade to a status hint
+        // instead of re-opening this modal on every poll.
+        this.autoConfirmationDismissed = true;
+      },
+      () => {
+        // Always runs on close, no matter the reason. Releasing the guard here
+        // (rather than only on submit/dismiss) guarantees it can never get
+        // stuck on and block every future confirmation modal.
+        this.confirmationModalOpen = false;
+      }
+    ).open();
   }
 
   private openFirstSyncModal(): void {
@@ -603,11 +784,18 @@ export default class RemoteSyncPlugin extends Plugin {
       // 启动同步：拉取其它设备在本设备离线期间的远端改动
       void this.syncAutomatically();
 
+      // 窗口从后台切回前台/从休眠唤醒时，立即补一次同步，覆盖关闭期间其它设备
+      // 或外部程序改动了文件但本地没有 vault 事件的漏感知场景。syncAutomatically
+      // 自带 stale 守卫，频繁 focus 不会引发重复执行。
+      this.registerDomEvent(globalThis as unknown as Window, "focus", () => {
+        void this.syncAutomatically();
+      });
+
       // 定时轮询：补齐"本地无文件事件但远端已变"的漏感知场景
       this.registerInterval(
-        window.setInterval(() => {
+        setInterval(() => {
           void this.syncAutomatically();
-        }, AUTO_SYNC_POLL_INTERVAL_MS)
+        }, AUTO_SYNC_POLL_INTERVAL_MS) as unknown as number
       );
     });
   }

@@ -62,32 +62,57 @@ export class SyncStateStore {
   async saveSuccessfulSync(
     local: FileEntry[],
     remote: FileEntry[],
-    readTextContent?: (path: string) => Promise<string | undefined>
+    readTextContent?: (path: string) => Promise<string | undefined>,
+    unresolvedPaths: Set<string> = new Set()
   ): Promise<void> {
     const localMap = new Map(local.map((entry) => [entry.path, entry]));
     const remoteMap = new Map(remote.map((entry) => [entry.path, entry]));
-    const paths = new Set<string>([...localMap.keys(), ...remoteMap.keys()]);
+    const previousMap = new Map(
+      this.state.previousEntries.map((entry) => [entry.path, entry])
+    );
 
-    const previousEntries = await Promise.all(
-      [...paths].sort().map(async (path) => {
-        const localEntry = localMap.get(path);
-        const remoteEntry = remoteMap.get(path);
-        const mergeBase =
-          localEntry && remoteEntry && readTextContent && canStoreMergeBase(localEntry)
-            ? await readTextContent(path).then((content) =>
-                typeof content === "string"
-                  ? { source: "previous-sync-state" as const, content }
-                  : undefined
-              )
-            : undefined;
+    // Resolved paths advance to the latest snapshot; unresolved ones are skipped
+    // here and re-injected from the previous baseline below, so a pending
+    // conflict's baseline is never clobbered with current disk state.
+    const snapshotPaths = new Set<string>([...localMap.keys(), ...remoteMap.keys()]);
+    const resolvedEntries = await Promise.all(
+      [...snapshotPaths]
+        .filter((path) => !unresolvedPaths.has(path))
+        .sort()
+        .map(async (path) => {
+          const localEntry = localMap.get(path);
+          const remoteEntry = remoteMap.get(path);
+          const mergeBase =
+            localEntry && remoteEntry && readTextContent && canStoreMergeBase(localEntry)
+              ? await readTextContent(path).then((content) =>
+                  typeof content === "string"
+                    ? { source: "previous-sync-state" as const, content }
+                    : undefined
+                )
+              : undefined;
 
-        return {
-          path,
-          local: localEntry,
-          remote: remoteEntry,
-          mergeBase
-        };
-      })
+          return {
+            path,
+            local: localEntry,
+            remote: remoteEntry,
+            mergeBase
+          };
+        })
+    );
+
+    // For every unresolved path, keep its previous baseline verbatim. If it has
+    // no previous baseline (first-seen conflict), it is intentionally omitted so
+    // it is not mistaken for already-synced next time.
+    const preservedEntries: PreviousEntry[] = [];
+    for (const path of unresolvedPaths) {
+      const previous = previousMap.get(path);
+      if (previous) {
+        preservedEntries.push(previous);
+      }
+    }
+
+    const previousEntries = [...resolvedEntries, ...preservedEntries].sort((a, b) =>
+      a.path < b.path ? -1 : a.path > b.path ? 1 : 0
     );
 
     this.state = {

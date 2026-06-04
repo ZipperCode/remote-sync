@@ -101,6 +101,11 @@ export interface SyncConfirmationDecision {
   action: SyncConfirmationAction;
 }
 
+export interface RenameMapping {
+  from: string;
+  to: string;
+}
+
 export interface SkippedEntry {
   path: string;
   side: "local" | "remote";

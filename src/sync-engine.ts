@@ -8,7 +8,7 @@ import {
 } from "./sync-planner";
 import { SyncStateStore } from "./sync-state-store";
 import { normalizeVaultPath, REMOTE_SYNC_TRASH_DIR, shouldIgnorePath } from "./path-utils";
-import { NonMergeableConflictPolicy, SyncConfirmationAction, SyncSafetyMode } from "./sync-types";
+import { NonMergeableConflictPolicy, RenameMapping, SyncConfirmationAction, SyncSafetyMode } from "./sync-types";
 import { decodeTextContent, encodeTextContent, mergeTextContent } from "./text-merge";
 import { buildConflictCopyPath } from "./device-id";
 
@@ -16,6 +16,7 @@ export type InitialSyncMode = "ask" | "merge" | "use-local" | "use-remote";
 
 export interface SyncOnceOptions {
   initialSyncMode?: InitialSyncMode;
+  renames?: RenameMapping[];
 }
 
 export interface SyncLocalStore {
@@ -153,6 +154,40 @@ export class SyncEngine {
       return { plan, summary };
     }
 
+    // 整轮同步共用同一个 trashBatch：rename 搬迁的备份与后续 plan.operations 的备份
+    // 都落入同一批次目录。此处已确定非 initialSyncRequired（上方已早返回），
+    // 故仅在确实要执行操作时才分配批次名，不会在"只返回计划"的纯查询路径上凭空生成。
+    const trashBatch = createTrashBatchName();
+
+    const renameHandledPaths = new Set<string>();
+    const renameFailures: SyncFailureDetail[] = [];
+    let renameBackups = 0;
+    if (options.renames && options.renames.length > 0) {
+      renameBackups = await this.applyRenames(
+        options.renames,
+        localSnapshot,
+        remoteSnapshot,
+        renameHandledPaths,
+        renameFailures,
+        trashBatch
+      );
+      if (renameHandledPaths.size > 0) {
+        plan = {
+          ...plan,
+          operations: plan.operations.filter((op) => !renameHandledPaths.has(op.path)),
+          confirmations: plan.confirmations.filter((c) => !renameHandledPaths.has(c.path)),
+          conflicts: plan.conflicts.filter((c) => !renameHandledPaths.has(c.path))
+        };
+      }
+    }
+
+    for (const failure of renameFailures) {
+      summary.failureDetails.push(failure);
+      summary.failures += 1;
+    }
+    // rename 搬迁删除远端旧文件前产生的本地备份计入总备份数。
+    summary.backedUp += renameBackups;
+
     const approvedOperations = this.buildApprovedOperations(plan.confirmations, decisions);
     const approvedPaths = new Set(approvedOperations.map(({ confirmation }) => confirmation.path));
     const pendingConfirmations = plan.confirmations.filter(
@@ -161,7 +196,6 @@ export class SyncEngine {
     summary.pendingConfirmations = pendingConfirmations.length;
     summary.conflicts = pendingConfirmations.length;
 
-    const trashBatch = createTrashBatchName();
     for (const operation of plan.operations) {
       try {
         summary.backedUp += await this.executeOperation(operation, trashBatch);
@@ -187,26 +221,35 @@ export class SyncEngine {
     summary.pendingConfirmations = pendingConfirmations.length;
     summary.conflicts = pendingConfirmations.length;
 
-    if (summary.failures === 0 && summary.pendingConfirmations === 0) {
-      const [updatedLocalSnapshot, updatedRemoteSnapshot] = await Promise.all([
-        this.local.snapshot(),
-        this.remote.snapshot()
-      ]);
-      try {
-        await this.stateStore.saveSuccessfulSync(
-          this.filterIgnoredEntries(updatedLocalSnapshot),
-          this.filterIgnoredEntries(updatedRemoteSnapshot),
-          async (path) => {
-            try {
-              return decodeTextContent(await this.local.readFile(path));
-            } catch {
-              return undefined;
-            }
+    // 即便存在待确认/失败，也要落盘已成功的部分：对已处理路径推进基线，对
+    // 待确认与失败路径保留旧基线，避免"一个未决导致整体重算、永远待确认"。
+    // 注意时序：unresolvedPaths 必须在落盘之前算好。落盘失败时记录的伪路径
+    // "<sync-state>" 是在下方 catch 里才并入 failureDetails 的，不会回灌进本集合，
+    // 故不会被 saveSuccessfulSync 误当作真实文件路径处理。
+    const unresolvedPaths = new Set<string>([
+      ...pendingConfirmations.map((confirmation) => confirmation.path),
+      ...summary.failureDetails.map((failure) => failure.path)
+    ]);
+    const [updatedLocalSnapshot, updatedRemoteSnapshot] = await Promise.all([
+      this.local.snapshot(),
+      this.remote.snapshot()
+    ]);
+    try {
+      await this.stateStore.saveSuccessfulSync(
+        this.filterIgnoredEntries(updatedLocalSnapshot),
+        this.filterIgnoredEntries(updatedRemoteSnapshot),
+        async (path) => {
+          try {
+            return decodeTextContent(await this.local.readFile(path));
+          } catch {
+            return undefined;
           }
-        );
-      } catch (error) {
-        this.recordFailure(summary, { path: "<sync-state>" }, error, "save-state");
-      }
+        },
+        unresolvedPaths
+      );
+    } catch (error) {
+      // 伪路径仅用于失败上报，不参与基线计算（见上方时序说明）。
+      this.recordFailure(summary, { path: "<sync-state>" }, error, "save-state");
     }
 
     return {
@@ -578,6 +621,64 @@ export class SyncEngine {
     await this.runStage(operation.path, "upload", () =>
       this.remote.writeFile(operation.path, localContent, operation.local)
     );
+
+    return backups;
+  }
+
+  private async applyRenames(
+    renames: RenameMapping[],
+    localSnapshot: FileEntry[],
+    remoteSnapshot: FileEntry[],
+    handled: Set<string>,
+    failures: SyncFailureDetail[],
+    trashBatch: string
+  ): Promise<number> {
+    // 快照路径未必归一化，而 plan 的 operations/confirmations 路径已被 planSync 归一化。
+    // 这里统一在归一化空间工作（Map 键、from/to、handled 三者一致），
+    // 确保 handled 能正确从 plan 中剔除已搬迁的路径，避免重复操作。
+    const localByPath = new Map(
+      localSnapshot.map((entry) => [normalizeVaultPath(entry.path), entry])
+    );
+    const remoteByPath = new Map(
+      remoteSnapshot.map((entry) => [normalizeVaultPath(entry.path), entry])
+    );
+
+    let backups = 0;
+
+    for (const rename of renames) {
+      const from = normalizeVaultPath(rename.from);
+      const to = normalizeVaultPath(rename.to);
+      if (!from || !to || from === to) {
+        continue;
+      }
+      const localTarget = localByPath.get(to);
+      const remoteSource = remoteByPath.get(from);
+      const remoteTargetExists = remoteByPath.has(to);
+
+      // 本地无新文件（改名后又删）、远端无旧文件（远端从无此文件）、
+      // 或远端已存在新文件（避免覆盖对端）—— 任一成立则不搬迁，交给正常计划处理。
+      if (!localTarget || !remoteSource || remoteTargetExists) {
+        continue;
+      }
+
+      try {
+        const content = await this.runStage(to, "upload", () => this.local.readFile(to));
+        await this.runStage(to, "upload", () => this.remote.writeFile(to, content, localTarget));
+        // 删除远端旧文件前必须先把其内容备份到本地 trash，维持引擎"任何远端删除都先落 trash"的契约。
+        // backupRemoteFileToLocal 内部已用 runStage 包裹（stage="backup-remote-to-local"），
+        // 失败会抛 SyncOperationFailure 中断本次搬迁，不会继续删除（备份失败计入 failures）。
+        backups += await this.backupRemoteFileToLocal(from, remoteSource, trashBatch);
+        await this.runStage(from, "delete-remote", () => this.remote.deleteFile(from));
+        handled.add(from);
+        handled.add(to);
+      } catch (error) {
+        if (error instanceof SyncOperationFailure) {
+          failures.push(error.detail);
+        } else {
+          failures.push({ path: to, stage: "upload", message: formatError(error) });
+        }
+      }
+    }
 
     return backups;
   }
