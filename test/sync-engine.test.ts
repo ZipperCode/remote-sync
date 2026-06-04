@@ -596,6 +596,172 @@ describe("SyncEngine", () => {
     expect(remote.written).toContain("renamed.md");
     expect(result.summary.pendingConfirmations).toBe(0);
   });
+
+  test("rename keeps data and records failure when writing the remote target fails", async () => {
+    const local = new FakeStore([file("new.md", 200)], { "new.md": "hello" });
+    const remote = new FakeStore([file("old.md", 100)], { "old.md": "hello" });
+    // 写远端新路径失败（new.md 触发），但 trash 备份写入本地不受影响。
+    remote.failWritesUnder = "new.md";
+
+    const adapter = new MemoryAdapter(
+      JSON.stringify({
+        version: 1,
+        lastSyncTime: 50,
+        previousEntries: [previous(file("old.md", 100))]
+      })
+    );
+    const stateStore = new SyncStateStore(adapter);
+    const before = adapter.value;
+    const engine = new SyncEngine(local, remote, stateStore, {
+      ignorePatterns: [],
+      syncSafetyMode: "safe"
+    });
+
+    const result = await engine.syncOnce([], {
+      renames: [{ from: "old.md", to: "new.md" }]
+    });
+
+    // 写远端新路径失败：搬迁未发生，旧文件未被删，新路径未 handled。
+    expect(remote.deleted).not.toContain("old.md");
+    expect(result.summary.failures).toBeGreaterThan(0);
+    // 至少有一个 new.md 的 upload 失败被记录。
+    // 注：搬迁失败后 new.md 未被 handled，仍以 local-only upload 留在计划中并被重试，
+    // 因远端写仍被阻塞而再次失败——这恰好证明数据未丢（new.md 仍待同步）。
+    expect(result.summary.failureDetails).toContainEqual(
+      expect.objectContaining({ path: "new.md", stage: "upload" })
+    );
+    expect(
+      result.summary.failureDetails.every(
+        (d) => d.path === "new.md" && d.stage === "upload"
+      )
+    ).toBe(true);
+    // 远端旧文件仍在，未做任何远端备份（trash 永不写远端）。
+    const remotePaths = (await remote.snapshot()).map((e) => e.path).sort();
+    expect(remotePaths).toEqual(["old.md"]);
+    expect(remote.written.some((p) => p.startsWith(".remote-sync-trash/"))).toBe(false);
+    // 写失败发生在备份之前，没有 trash 备份产生。
+    expect(local.written.some((p) => p.startsWith(".remote-sync-trash/"))).toBe(false);
+    expect(result.summary.backedUp).toBe(0);
+    // 有失败 -> 状态不保存（adapter 内容保持不变，且不含 new.md）。
+    expect(adapter.value).toBe(before);
+    expect(adapter.value).not.toContain("new.md");
+  });
+
+  test("rename backs up the remote source and keeps data when deleting it fails", async () => {
+    const local = new FakeStore([file("new.md", 200)], { "new.md": "renamed body" });
+    const remote = new FakeStore([file("old.md", 100)], { "old.md": "old body" });
+    // 删除远端旧文件失败（备份会先成功，删除步骤报错）。
+    remote.failDeletes = "old.md";
+
+    const stateStore = new SyncStateStore(
+      new MemoryAdapter(
+        JSON.stringify({
+          version: 1,
+          lastSyncTime: 50,
+          previousEntries: [previous(file("old.md", 100))]
+        })
+      )
+    );
+    const engine = new SyncEngine(local, remote, stateStore, {
+      ignorePatterns: [],
+      syncSafetyMode: "safe"
+    });
+
+    const result = await engine.syncOnce([], {
+      renames: [{ from: "old.md", to: "new.md" }]
+    });
+
+    // 新路径已写入远端，旧文件因删除失败仍在远端。
+    expect(remote.written).toContain("new.md");
+    expect(remote.deleted).not.toContain("old.md");
+    const remotePaths = (await remote.snapshot()).map((e) => e.path).sort();
+    expect(remotePaths).toEqual(["new.md", "old.md"]);
+    // 删除失败被记入 failures（stage=delete-remote），from/to 未 handled，故计划未剔除。
+    expect(result.summary.failures).toBeGreaterThan(0);
+    expect(result.summary.failureDetails).toEqual([
+      expect.objectContaining({ path: "old.md", stage: "delete-remote" })
+    ]);
+    // 删除前的远端备份已成功落入本地 trash（contract: 删远端前先落 trash）。
+    expect(
+      local.written.some(
+        (p) => p.startsWith(".remote-sync-trash/") && p.includes("/remote/old.md")
+      )
+    ).toBe(true);
+    expect(result.summary.backedUp).toBe(1);
+  });
+
+  test("rename skips when from equals to without touching the remote", async () => {
+    const local = new FakeStore([file("same.md", 200)], { "same.md": "body" });
+    const remote = new FakeStore([file("same.md", 200)], { "same.md": "body" });
+
+    const stateStore = new SyncStateStore(
+      new MemoryAdapter(
+        JSON.stringify({
+          version: 1,
+          lastSyncTime: 50,
+          previousEntries: [previous(file("same.md", 200))]
+        })
+      )
+    );
+    const engine = new SyncEngine(local, remote, stateStore, {
+      ignorePatterns: [],
+      syncSafetyMode: "safe"
+    });
+
+    const result = await engine.syncOnce([], {
+      renames: [{ from: "same.md", to: "same.md" }]
+    });
+
+    // from === to：搬迁被跳过，无任何远端写/删，无失败、无未决确认。
+    expect(remote.deleted).toEqual([]);
+    expect(remote.written.some((p) => p.startsWith(".remote-sync-trash/"))).toBe(false);
+    expect(result.summary.failures).toBe(0);
+    expect(result.summary.pendingConfirmations).toBe(0);
+    expect(result.summary.backedUp).toBe(0);
+  });
+
+  test("rename moves multiple independent files", async () => {
+    const local = new FakeStore([file("x.md", 200), file("y.md", 200)], {
+      "x.md": "x body",
+      "y.md": "y body"
+    });
+    const remote = new FakeStore([file("a.md", 100), file("b.md", 100)], {
+      "a.md": "x body",
+      "b.md": "y body"
+    });
+
+    const stateStore = new SyncStateStore(
+      new MemoryAdapter(
+        JSON.stringify({
+          version: 1,
+          lastSyncTime: 50,
+          previousEntries: [previous(file("a.md", 100)), previous(file("b.md", 100))]
+        })
+      )
+    );
+    const engine = new SyncEngine(local, remote, stateStore, {
+      ignorePatterns: [],
+      syncSafetyMode: "safe"
+    });
+
+    const result = await engine.syncOnce([], {
+      renames: [
+        { from: "a.md", to: "x.md" },
+        { from: "b.md", to: "y.md" }
+      ]
+    });
+
+    // 两个独立 rename 都被搬迁：旧文件删除、新文件写入远端。
+    expect(remote.deleted).toContain("a.md");
+    expect(remote.deleted).toContain("b.md");
+    expect(remote.written).toContain("x.md");
+    expect(remote.written).toContain("y.md");
+    const remotePaths = (await remote.snapshot()).map((e) => e.path).sort();
+    expect(remotePaths).toEqual(["x.md", "y.md"]);
+    // 都不进 pending、两次远端备份。
+    expect(result.summary.pendingConfirmations).toBe(0);
+    expect(result.summary.backedUp).toBe(2);
+  });
 });
 
 function entry(path: string, content: string, mtime: number): FileEntry {
