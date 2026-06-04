@@ -223,31 +223,33 @@ export class SyncEngine {
 
     // 即便存在待确认/失败，也要落盘已成功的部分：对已处理路径推进基线，对
     // 待确认与失败路径保留旧基线，避免"一个未决导致整体重算、永远待确认"。
+    // 注意时序：unresolvedPaths 必须在落盘之前算好。落盘失败时记录的伪路径
+    // "<sync-state>" 是在下方 catch 里才并入 failureDetails 的，不会回灌进本集合，
+    // 故不会被 saveSuccessfulSync 误当作真实文件路径处理。
     const unresolvedPaths = new Set<string>([
       ...pendingConfirmations.map((confirmation) => confirmation.path),
       ...summary.failureDetails.map((failure) => failure.path)
     ]);
-    {
-      const [updatedLocalSnapshot, updatedRemoteSnapshot] = await Promise.all([
-        this.local.snapshot(),
-        this.remote.snapshot()
-      ]);
-      try {
-        await this.stateStore.saveSuccessfulSync(
-          this.filterIgnoredEntries(updatedLocalSnapshot),
-          this.filterIgnoredEntries(updatedRemoteSnapshot),
-          async (path) => {
-            try {
-              return decodeTextContent(await this.local.readFile(path));
-            } catch {
-              return undefined;
-            }
-          },
-          unresolvedPaths
-        );
-      } catch (error) {
-        this.recordFailure(summary, { path: "<sync-state>" }, error, "save-state");
-      }
+    const [updatedLocalSnapshot, updatedRemoteSnapshot] = await Promise.all([
+      this.local.snapshot(),
+      this.remote.snapshot()
+    ]);
+    try {
+      await this.stateStore.saveSuccessfulSync(
+        this.filterIgnoredEntries(updatedLocalSnapshot),
+        this.filterIgnoredEntries(updatedRemoteSnapshot),
+        async (path) => {
+          try {
+            return decodeTextContent(await this.local.readFile(path));
+          } catch {
+            return undefined;
+          }
+        },
+        unresolvedPaths
+      );
+    } catch (error) {
+      // 伪路径仅用于失败上报，不参与基线计算（见上方时序说明）。
+      this.recordFailure(summary, { path: "<sync-state>" }, error, "save-state");
     }
 
     return {
