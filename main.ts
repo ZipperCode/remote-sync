@@ -36,6 +36,9 @@ interface PluginData {
 class SyncConfirmationModal extends Modal {
   private readonly decisions = new Map<string, SyncConfirmationDecision["action"]>();
   private submitted = false;
+  // Per-path dropdown components so bulk buttons can refresh the visible value
+  // after programmatically changing a decision.
+  private readonly dropdowns = new Map<string, { setValue: (v: string) => unknown }>();
 
   constructor(
     app: App,
@@ -61,31 +64,82 @@ class SyncConfirmationModal extends Modal {
       text: "以下文件存在需要人工介入的冲突。可自动合并的文本文件会优先尝试自动合并。"
     });
 
+    // Group confirmations by coarse conflict category so users can resolve a
+    // whole category (e.g. dozens of deletions) with one click.
+    const groups: Array<{ key: "delete" | "text" | "binary"; title: string; items: SyncConfirmation[] }> = [
+      { key: "delete", title: "删除类冲突", items: [] },
+      { key: "text", title: "文本类冲突", items: [] },
+      { key: "binary", title: "二进制/其它冲突", items: [] }
+    ];
     for (const confirmation of this.confirmations) {
-      const defaultAction = this.defaultAction(confirmation);
-      this.decisions.set(confirmation.path, defaultAction);
+      const group = groups.find((g) => g.key === this.groupOf(confirmation));
+      group?.items.push(confirmation);
+    }
 
-      new Setting(contentEl)
-        .setName(confirmation.path)
-        .setDesc(this.describeConfirmation(confirmation))
-        .addDropdown((dropdown) => {
-          dropdown.addOption("skip", "跳过");
-          if (confirmation.suggestedKind === "merge") {
-            dropdown.addOption("auto-merge", "自动合并");
-          }
-          if (confirmation.local) {
-            dropdown.addOption("use-local", "使用本地版本");
-          }
-          if (confirmation.remote) {
-            dropdown.addOption("use-remote", "使用远端版本");
-          }
-          if ((confirmation.local && !confirmation.remote) || (confirmation.remote && !confirmation.local)) {
-            dropdown.addOption("accept-delete", "接受删除");
-          }
-          dropdown.setValue(defaultAction).onChange((value) => {
-            this.decisions.set(confirmation.path, value as SyncConfirmationDecision["action"]);
+    for (const group of groups) {
+      if (group.items.length === 0) {
+        continue;
+      }
+      contentEl.createEl("h3", { text: `${group.title}（${group.items.length}）` });
+
+      // Bulk-action row for this group.
+      const bulkRow = new Setting(contentEl).setName("批量处理本组");
+      if (group.key === "delete") {
+        bulkRow
+          .addButton((b) => b.setButtonText("全部接受删除").onClick(() =>
+            this.submitWith(group.items, () => "accept-delete")))
+          .addButton((b) => b.setButtonText("全部保留").onClick(() =>
+            this.submitWith(group.items, (c) => (c.local ? "use-local" : "use-remote"))))
+          .addButton((b) => b.setButtonText("全组跳过").onClick(() =>
+            this.submitWith(group.items, () => "skip")));
+      } else if (group.key === "text") {
+        bulkRow
+          .addButton((b) => b.setButtonText("全部自动合并").onClick(() =>
+            this.submitWith(group.items, (c) => (c.suggestedKind === "merge" ? "auto-merge" : this.decisions.get(c.path) ?? "skip"))))
+          .addButton((b) => b.setButtonText("全部用本地").onClick(() =>
+            this.submitWith(group.items, () => "use-local")))
+          .addButton((b) => b.setButtonText("全部用远端").onClick(() =>
+            this.submitWith(group.items, () => "use-remote")))
+          .addButton((b) => b.setButtonText("全组跳过").onClick(() =>
+            this.submitWith(group.items, () => "skip")));
+      } else {
+        bulkRow
+          .addButton((b) => b.setButtonText("全部用本地").onClick(() =>
+            this.submitWith(group.items, () => "use-local")))
+          .addButton((b) => b.setButtonText("全部用远端").onClick(() =>
+            this.submitWith(group.items, () => "use-remote")))
+          .addButton((b) => b.setButtonText("全组跳过").onClick(() =>
+            this.submitWith(group.items, () => "skip")));
+      }
+
+      // Per-item dropdowns (unchanged behaviour, finer control).
+      for (const confirmation of group.items) {
+        const defaultAction = this.defaultAction(confirmation);
+        this.decisions.set(confirmation.path, defaultAction);
+
+        new Setting(contentEl)
+          .setName(confirmation.path)
+          .setDesc(this.describeConfirmation(confirmation))
+          .addDropdown((dropdown) => {
+            dropdown.addOption("skip", "跳过");
+            if (confirmation.suggestedKind === "merge") {
+              dropdown.addOption("auto-merge", "自动合并");
+            }
+            if (confirmation.local) {
+              dropdown.addOption("use-local", "使用本地版本");
+            }
+            if (confirmation.remote) {
+              dropdown.addOption("use-remote", "使用远端版本");
+            }
+            if ((confirmation.local && !confirmation.remote) || (confirmation.remote && !confirmation.local)) {
+              dropdown.addOption("accept-delete", "接受删除");
+            }
+            dropdown.setValue(defaultAction).onChange((value) => {
+              this.decisions.set(confirmation.path, value as SyncConfirmationDecision["action"]);
+            });
+            this.dropdowns.set(confirmation.path, dropdown);
           });
-        });
+      }
     }
 
     new Setting(contentEl)
@@ -140,6 +194,37 @@ class SyncConfirmationModal extends Modal {
     // Always release the guard, regardless of why the modal closed.
     this.onClosed?.();
     this.contentEl.empty();
+  }
+
+  private groupOf(confirmation: SyncConfirmation): "delete" | "text" | "binary" {
+    if (confirmation.conflictType === "delete-vs-modify") {
+      return "delete";
+    }
+    if (confirmation.conflictType === "binary") {
+      return "binary";
+    }
+    return "text";
+  }
+
+  // Apply a bulk decision to a group, refresh the visible dropdowns, then submit
+  // immediately (the user explicitly chose a one-click bulk action). Decisions
+  // for paths outside the group keep whatever the per-item dropdowns hold.
+  private submitWith(
+    items: SyncConfirmation[],
+    pick: (confirmation: SyncConfirmation) => SyncConfirmationDecision["action"]
+  ): void {
+    for (const confirmation of items) {
+      const action = pick(confirmation);
+      this.decisions.set(confirmation.path, action);
+      this.dropdowns.get(confirmation.path)?.setValue(action);
+    }
+    const decisions = this.confirmations.map((confirmation) => ({
+      path: confirmation.path,
+      action: this.decisions.get(confirmation.path) ?? "skip"
+    }));
+    this.submitted = true;
+    this.close();
+    this.onSubmit(decisions);
   }
 
   private defaultAction(confirmation: SyncConfirmation): SyncConfirmationDecision["action"] {

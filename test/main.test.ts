@@ -62,9 +62,14 @@ vi.mock("obsidian", () => {
       return this;
     }
     addDropdown(cb: (dropdown: unknown) => void): this {
+      let current = "";
       const dropdown: any = {
         addOption: vi.fn(() => dropdown),
-        setValue: vi.fn(() => dropdown),
+        setValue: vi.fn((value: string) => {
+          current = value;
+          return dropdown;
+        }),
+        getValue: vi.fn(() => current),
         onChange: vi.fn(() => dropdown)
       };
       cb(dropdown);
@@ -308,6 +313,89 @@ describe("RemoteSyncPlugin", () => {
 
     return { plugin, statusText, syncOnce };
   }
+
+  // Builds a plugin whose engine reports the given confirmations, captures the
+  // decisions submitted by the modal so a test can assert what the group
+  // buttons produced.
+  async function buildGroupedConfirmationPlugin(confirmations: any[]) {
+    const { Notice } = await import("obsidian");
+    vi.mocked(Notice).mockClear();
+    modalHooks.reset();
+
+    const { default: RemoteSyncPlugin } = await import("../main.ts");
+    const plugin = new RemoteSyncPlugin();
+    const submitted: any[] = [];
+
+    const result = {
+      plan: {
+        operations: [],
+        confirmations,
+        conflicts: [],
+        skipped: [],
+        initialSyncRequired: false
+      },
+      summary: {
+        uploaded: 0, downloaded: 0, deletedLocal: 0, deletedRemote: 0,
+        merged: 0, skipped: 0, conflicts: 0,
+        pendingConfirmations: confirmations.length,
+        backedUp: 0, failures: 0, initialSyncRequired: false, failureDetails: []
+      }
+    };
+    // First call returns the confirmations; the resubmit (confirmManually:false)
+    // call captures decisions and returns a clean result.
+    const syncOnce = vi
+      .fn()
+      .mockResolvedValueOnce(result)
+      .mockImplementation(async (decisions: any[]) => {
+        if (decisions) submitted.push(...decisions);
+        return { ...result, plan: { ...result.plan, confirmations: [] }, summary: { ...result.summary, pendingConfirmations: 0 } };
+      });
+
+    Object.assign(plugin, {
+      manifest: { id: "obsidian-webdav-sync", version: "0.1.1" },
+      statusBarItemEl: { setText: vi.fn() },
+      settings: { provider: "webdav", baseUrl: "https://example.com/dav", customHeaders: "" },
+      createEngine: () => ({ syncOnce })
+    });
+
+    return { plugin, submitted };
+  }
+
+  test("group button '全部接受删除' applies accept-delete to all delete-vs-modify entries only", async () => {
+    const confirmations = [
+      { path: "del1.md", conflictType: "delete-vs-modify", reason: "remote-deleted", local: { path: "del1.md" } },
+      { path: "del2.md", conflictType: "delete-vs-modify", reason: "remote-deleted", local: { path: "del2.md" } },
+      { path: "bin.png", conflictType: "binary", reason: "same-mtime-different-size", local: { path: "bin.png" }, remote: { path: "bin.png" } }
+    ];
+    const { plugin, submitted } = await buildGroupedConfirmationPlugin(confirmations);
+
+    await (plugin as unknown as { syncNow: () => Promise<void> }).syncNow();
+    expect(modalHooks.openCount).toBe(1);
+
+    // Click the delete-group bulk button.
+    modalHooks.click("全部接受删除");
+
+    const byPath = new Map(submitted.map((d) => [d.path, d.action]));
+    expect(byPath.get("del1.md")).toBe("accept-delete");
+    expect(byPath.get("del2.md")).toBe("accept-delete");
+    // The binary entry must NOT be forced to accept-delete by the delete group.
+    expect(byPath.get("bin.png")).not.toBe("accept-delete");
+  });
+
+  test("group button '全部用远端' applies use-remote to all text-conflict entries", async () => {
+    const confirmations = [
+      { path: "t1.md", conflictType: "text-overlap", reason: "both-changed", local: { path: "t1.md" }, remote: { path: "t1.md" } },
+      { path: "t2.md", conflictType: "text-no-base", reason: "both-changed", local: { path: "t2.md" }, remote: { path: "t2.md" } }
+    ];
+    const { plugin, submitted } = await buildGroupedConfirmationPlugin(confirmations);
+
+    await (plugin as unknown as { syncNow: () => Promise<void> }).syncNow();
+    modalHooks.click("全部用远端");
+
+    const byPath = new Map(submitted.map((d) => [d.path, d.action]));
+    expect(byPath.get("t1.md")).toBe("use-remote");
+    expect(byPath.get("t2.md")).toBe("use-remote");
+  });
 
   test("confirmation modal guard prevents concurrent opens", async () => {
     const { plugin } = await buildConfirmationPlugin();
