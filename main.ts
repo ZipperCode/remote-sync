@@ -452,6 +452,14 @@ export default class RemoteSyncPlugin extends Plugin {
       }
     });
 
+    this.addCommand({
+      id: "reset-sync-state",
+      name: "重置同步状态",
+      callback: () => {
+        this.resetSyncState();
+      }
+    });
+
     if (!Platform.isMobile) {
       this.statusBarItemEl = this.addStatusBarItem();
       this.updateStatus("空闲");
@@ -541,6 +549,14 @@ export default class RemoteSyncPlugin extends Plugin {
 
   async resolveSyncConfirmations(): Promise<void> {
     await this.runSync({ showBusyNotice: true, showConfigNotice: true, confirmManually: true });
+  }
+
+  resetSyncState(): void {
+    // Force-release a stuck sync lock so a hung request (that never timed out)
+    // can no longer block manual syncs, then immediately retry.
+    this.syncStartedAt = null;
+    new Notice("已重置同步状态，正在重新同步…");
+    void this.syncNow();
   }
 
   private async syncAutomatically(): Promise<AutoSyncRunResult> {

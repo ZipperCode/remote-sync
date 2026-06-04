@@ -152,6 +152,45 @@ describe("RemoteSyncPlugin", () => {
     expect(updateCommand?.name).toBe("检查插件更新");
   });
 
+  test("registers a '重置同步状态' command that clears the stale lock and re-syncs", async () => {
+    const { default: RemoteSyncPlugin } = await import("../main.ts");
+    const plugin = new RemoteSyncPlugin();
+    const addCommand = vi.fn();
+
+    Object.assign(plugin, {
+      app: { workspace: { on: vi.fn(() => ({})) }, vault: { getName: vi.fn(() => "V") } },
+      loadData: vi.fn(async () => ({ settings: {} })),
+      saveData: vi.fn(async () => {}),
+      registerView: vi.fn(),
+      registerExtensions: vi.fn(),
+      registerEvent: vi.fn(),
+      register: vi.fn(),
+      addRibbonIcon: vi.fn(),
+      addCommand,
+      addStatusBarItem: vi.fn(() => ({ setText: vi.fn() })),
+      addSettingTab: vi.fn(),
+      registerAutoSync: vi.fn()
+    });
+
+    await plugin.onload();
+
+    const resetCommand = addCommand.mock.calls
+      .map(([command]) => command)
+      .find((command) => command.id === "reset-sync-state");
+    expect(resetCommand?.name).toBe("重置同步状态");
+
+    // Simulate a stuck lock, then invoke the command callback.
+    const internals = plugin as unknown as { syncStartedAt: number | null; syncNow: () => Promise<void> };
+    internals.syncStartedAt = 123;
+    const syncNow = vi.fn(async () => {});
+    internals.syncNow = syncNow;
+
+    resetCommand!.callback();
+
+    expect(internals.syncStartedAt).toBeNull();
+    expect(syncNow).toHaveBeenCalledTimes(1);
+  });
+
   test("downloads and applies the latest plugin release files", async () => {
     const { Notice, requestUrl } = await import("obsidian");
     const { default: RemoteSyncPlugin } = await import("../main.ts");
