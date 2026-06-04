@@ -25,7 +25,9 @@ import { applyPluginUpdate, checkForPluginUpdate, type PluginFileAdapter } from 
 import type { Editor, MarkdownView } from "obsidian";
 
 const STALE_SYNC_THRESHOLD_MS = 2 * 60 * 1000;
-const AUTO_SYNC_POLL_INTERVAL_MS = 2 * 60 * 1000;
+// 轮询周期略大于 stale 阈值：让"判定僵死"先于"下一轮轮询触发"，避免一次接近
+// 2 分钟的慢同步在自然完成的同一时刻被下一轮误判为僵死而接管，语义更清晰。
+const AUTO_SYNC_POLL_INTERVAL_MS = 150 * 1000;
 
 interface PluginData {
   settings?: Partial<RemoteSyncSettings>;
