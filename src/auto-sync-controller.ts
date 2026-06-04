@@ -61,7 +61,11 @@ export class AutoSyncController {
       }
     }
     if (origin === to) {
-      // 改回原名，净效果为空：移除该链。
+      // 改回原名（A→B→A），净效果为空：移除该链。
+      // 注意：真正的两文件交换（a↔b 互换名字）产生的事件序列与"改回原名"完全相同，
+      // 因此也会在此被合并为空。这是已知且可接受的退化——引擎 applyRenames 的
+      // remoteTargetExists 守卫 + trash 备份保证此时退化为普通同步计划不会丢数据，
+      // 仅损失 rename 优化。区分两者需追踪文件内容/inode，不在当前范围内。
       this.pendingRenames.delete(origin);
       return;
     }

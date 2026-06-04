@@ -154,4 +154,45 @@ describe("AutoSyncController", () => {
     controller.handleVaultRename(".obsidian/new.json", ".obsidian/old.json");
     expect(controller.takePendingRenames()).toEqual([]);
   });
+
+  test("collapses A -> B -> A back to original as a no-op", async () => {
+    const sync = vi.fn(async () => "completed" as const);
+    const controller = new AutoSyncController({
+      sync,
+      shouldIgnorePath: () => false
+    });
+
+    controller.handleVaultRename("b.md", "a.md");
+    controller.handleVaultRename("a.md", "b.md");
+    expect(controller.takePendingRenames()).toEqual([]);
+  });
+
+  test("preserves multiple independent rename chains in insertion order", async () => {
+    const sync = vi.fn(async () => "completed" as const);
+    const controller = new AutoSyncController({
+      sync,
+      shouldIgnorePath: () => false
+    });
+
+    controller.handleVaultRename("b.md", "a.md");
+    controller.handleVaultRename("d.md", "c.md");
+    expect(controller.takePendingRenames()).toEqual([
+      { from: "a.md", to: "b.md" },
+      { from: "c.md", to: "d.md" }
+    ]);
+  });
+
+  test("known limitation: a two-file swap collapses like a round-trip rename", async () => {
+    // 文档化已知退化：两文件交换在事件层面与 A->B->A 不可区分，
+    // 当前会被合并为空 Map，退化为普通同步计划（引擎侧 trash 备份保证不丢数据）。
+    const sync = vi.fn(async () => "completed" as const);
+    const controller = new AutoSyncController({
+      sync,
+      shouldIgnorePath: () => false
+    });
+
+    controller.handleVaultRename("b.md", "a.md");
+    controller.handleVaultRename("a.md", "b.md");
+    expect(controller.takePendingRenames()).toEqual([]);
+  });
 });
