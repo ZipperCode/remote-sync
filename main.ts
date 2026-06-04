@@ -41,7 +41,14 @@ class SyncConfirmationModal extends Modal {
     app: App,
     private readonly confirmations: SyncConfirmation[],
     private readonly onSubmit: (decisions: SyncConfirmationDecision[]) => void,
-    private readonly onDismissWithoutSubmit?: () => void
+    // Fired only when the user closed the modal without making any decision
+    // (X / Esc / "全部跳过"); used to degrade automatic confirmation prompts.
+    private readonly onDismissWithoutSubmit?: () => void,
+    // Fired on EVERY close path (submit / skip / passive dismiss / Esc),
+    // independent of `submitted`; used to release the open guard so the modal
+    // can be reopened later. Decoupling guard release from `submitted` prevents
+    // the guard from getting stuck on (and blocking all future modals).
+    private readonly onClosed?: () => void
   ) {
     super(app);
   }
@@ -101,7 +108,12 @@ class SyncConfirmationModal extends Modal {
         button
           .setButtonText("全部跳过")
           .onClick(() => {
-            this.submitted = true;
+            // "全部跳过" = skip this round AND quiet down: degrade automatic
+            // prompts to a status-bar hint instead of re-popping every poll.
+            // Deliberately leave `submitted` false so onClose runs the dismiss
+            // path (sets autoConfirmationDismissed=true). The always-on onClosed
+            // callback still releases the open guard, so this active click does
+            // NOT lock out future modals.
             this.close();
           })
       )
@@ -125,6 +137,8 @@ class SyncConfirmationModal extends Modal {
     if (!this.submitted) {
       this.onDismissWithoutSubmit?.();
     }
+    // Always release the guard, regardless of why the modal closed.
+    this.onClosed?.();
     this.contentEl.empty();
   }
 
@@ -516,7 +530,11 @@ export default class RemoteSyncPlugin extends Plugin {
           // without acting on it, stop re-opening it on every poll and degrade
           // to a status-bar hint instead so they can dismiss it for good.
           if (this.autoConfirmationDismissed) {
-            this.updateStatus(`待确认 ${result.plan.confirmations.length} 个，点击同步处理`);
+            // Persist the guidance into lastSyncLabel so a later vault change
+            // (onPendingChange, which falls back to lastSyncLabel when the
+            // pending count is 0) cannot overwrite this "how to resolve" hint.
+            this.lastSyncLabel = `待确认 ${result.plan.confirmations.length} 个，点击同步处理`;
+            this.updateStatus(this.lastSyncLabel);
           } else {
             this.openConfirmationModal(result.plan.confirmations);
           }
@@ -560,9 +578,9 @@ export default class RemoteSyncPlugin extends Plugin {
       this.app,
       confirmations,
       (confirmationDecisions) => {
-        // The user submitted a decision, so the conflicts are being handled
-        // and the degraded auto-confirmation state can be cleared.
-        this.confirmationModalOpen = false;
+        // The user submitted a decision, so the conflicts are actually being
+        // handled and the degraded auto-confirmation state can be cleared.
+        // (Guard release is handled by onClosed below, which always runs.)
         this.autoConfirmationDismissed = false;
         void this.runSync({
           showBusyNotice: true,
@@ -572,11 +590,16 @@ export default class RemoteSyncPlugin extends Plugin {
         });
       },
       () => {
-        // The user closed the modal without acting on it. Release the guard and
-        // remember the dismissal so automatic syncs degrade to a status hint
+        // The user closed the modal without acting on it (X / Esc / "全部跳过").
+        // Remember the dismissal so automatic syncs degrade to a status hint
         // instead of re-opening this modal on every poll.
-        this.confirmationModalOpen = false;
         this.autoConfirmationDismissed = true;
+      },
+      () => {
+        // Always runs on close, no matter the reason. Releasing the guard here
+        // (rather than only on submit/dismiss) guarantees it can never get
+        // stuck on and block every future confirmation modal.
+        this.confirmationModalOpen = false;
       }
     ).open();
   }

@@ -6,9 +6,21 @@ const modalHooks = vi.hoisted(() => {
     // The most recently opened modal instance, so tests can drive its
     // close() to emulate the user dismissing the dialog.
     lastInstance: null as null | { close: () => void },
+    // Button onClick handlers registered during the most recent onOpen,
+    // keyed by their button label, so tests can emulate a real button click
+    // (e.g. "全部跳过") instead of only the X / Esc close() path.
+    buttons: new Map<string, () => void>(),
     reset(): void {
       this.openCount = 0;
       this.lastInstance = null;
+      this.buttons.clear();
+    },
+    click(label: string): void {
+      const handler = this.buttons.get(label);
+      if (!handler) {
+        throw new Error(`No button registered with label "${label}"`);
+      }
+      handler();
     }
   };
 });
@@ -59,10 +71,18 @@ vi.mock("obsidian", () => {
       return this;
     }
     addButton(cb: (button: unknown) => void): this {
+      let label = "";
       const button: any = {
-        setButtonText: vi.fn(() => button),
+        setButtonText: vi.fn((text: string) => {
+          label = text;
+          return button;
+        }),
         setCta: vi.fn(() => button),
-        onClick: vi.fn(() => button)
+        // Record the handler under the button's label so tests can fire it.
+        onClick: vi.fn((handler: () => void) => {
+          modalHooks.buttons.set(label, handler);
+          return button;
+        })
       };
       cb(button);
       return this;
@@ -316,6 +336,53 @@ describe("RemoteSyncPlugin", () => {
     await (plugin as unknown as { syncAutomatically: () => Promise<unknown> }).syncAutomatically();
 
     expect(modalHooks.openCount).toBe(1);
+    expect(statusText).toHaveBeenCalledWith(
+      expect.stringContaining("待确认 1 个，点击同步处理")
+    );
+  });
+
+  test('"全部跳过" releases the guard so a later manual sync can reopen the modal', async () => {
+    const { plugin } = await buildConfirmationPlugin();
+
+    // First auto sync opens the confirmation modal.
+    await (plugin as unknown as { syncAutomatically: () => Promise<unknown> }).syncAutomatically();
+    expect(modalHooks.openCount).toBe(1);
+
+    // The user clicks "全部跳过". This must release the open guard even though
+    // no decision was submitted; otherwise confirmationModalOpen would stay
+    // true forever and block every future confirmation modal.
+    modalHooks.click("全部跳过");
+
+    // A manual sync (confirmManually, NOT autoConfirm) clears the degraded
+    // state and should be able to reopen the modal again.
+    await (plugin as unknown as { syncNow: () => Promise<void> }).syncNow();
+
+    expect(modalHooks.openCount).toBe(2);
+  });
+
+  test("degraded auto sync persists guidance into lastSyncLabel for onPendingChange fallback", async () => {
+    const { plugin, statusText } = await buildConfirmationPlugin();
+
+    // Open then dismiss the modal so automatic syncs degrade to the hint.
+    await (plugin as unknown as { syncAutomatically: () => Promise<unknown> }).syncAutomatically();
+    modalHooks.lastInstance?.close();
+
+    // Degraded auto sync must persist the guidance into lastSyncLabel (not just
+    // call updateStatus once), because onPendingChange falls back to
+    // lastSyncLabel when pendingCount === 0. If it only called updateStatus,
+    // the next vault change would overwrite the "how to resolve" hint.
+    await (plugin as unknown as { syncAutomatically: () => Promise<unknown> }).syncAutomatically();
+
+    const internals = plugin as unknown as {
+      lastSyncLabel: string;
+      updateStatus: (value: string) => void;
+    };
+    expect(internals.lastSyncLabel).toContain("待确认 1 个，点击同步处理");
+
+    // Emulate registerAutoSync's onPendingChange(0): updateStatus(lastSyncLabel).
+    // The status bar must still surface the guidance, not a generic label.
+    statusText.mockClear();
+    internals.updateStatus(internals.lastSyncLabel);
     expect(statusText).toHaveBeenCalledWith(
       expect.stringContaining("待确认 1 个，点击同步处理")
     );
