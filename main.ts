@@ -514,8 +514,12 @@ export default class RemoteSyncPlugin extends Plugin {
     this.updateStatus("同步中...");
 
     try {
+      // 取出本批待处理的重命名映射（取出即清空），透传给引擎在远端执行搬迁，
+      // 避免重命名被拆成「删旧+增新」而误判为删除冲突。手动与自动同步都经此处。
+      const renames = this.autoSyncController?.takePendingRenames() ?? [];
       const result = await this.createEngine().syncOnce(options.confirmationDecisions, {
-        initialSyncMode: options.initialSyncMode ?? "ask"
+        initialSyncMode: options.initialSyncMode ?? "ask",
+        renames
       });
       this.handleSyncResult(result);
       if (result.plan.initialSyncRequired) {
