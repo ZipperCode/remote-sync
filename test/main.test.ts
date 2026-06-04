@@ -535,4 +535,47 @@ describe("RemoteSyncPlugin", () => {
       expect.stringContaining("待确认 1 个，点击同步处理")
     );
   });
+
+  test("registers a window focus handler that triggers an automatic sync", async () => {
+    const { default: RemoteSyncPlugin } = await import("../main.ts");
+    const plugin = new RemoteSyncPlugin();
+
+    // Capture the focus handler registered via registerDomEvent(window, "focus").
+    let focusHandler: (() => void) | null = null;
+    const registerDomEvent = vi.fn((_target: unknown, event: string, handler: () => void) => {
+      if (event === "focus") {
+        focusHandler = handler;
+      }
+    });
+
+    const syncAutomatically = vi.fn(async () => "completed");
+
+    Object.assign(plugin, {
+      app: {
+        workspace: {
+          on: vi.fn(() => ({})),
+          onLayoutReady: (cb: () => void) => cb()
+        },
+        vault: { on: vi.fn(() => ({})), getName: vi.fn(() => "V") }
+      },
+      settings: { ignorePatterns: [] },
+      manifest: { id: "obsidian-webdav-sync" },
+      registerEvent: vi.fn(),
+      register: vi.fn(),
+      registerDomEvent,
+      registerInterval: vi.fn(),
+      syncAutomatically
+    });
+
+    // Call the real registerAutoSync.
+    (plugin as unknown as { registerAutoSync: () => void }).registerAutoSync();
+
+    // onLayoutReady runs synchronously in the stub; the startup sync fires once.
+    expect(syncAutomatically).toHaveBeenCalledTimes(1);
+
+    // Firing the window focus event triggers another automatic sync.
+    expect(focusHandler).toBeTypeOf("function");
+    focusHandler!();
+    expect(syncAutomatically).toHaveBeenCalledTimes(2);
+  });
 });

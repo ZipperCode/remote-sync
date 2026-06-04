@@ -25,7 +25,7 @@ import { applyPluginUpdate, checkForPluginUpdate, type PluginFileAdapter } from 
 import type { Editor, MarkdownView } from "obsidian";
 
 const STALE_SYNC_THRESHOLD_MS = 2 * 60 * 1000;
-const AUTO_SYNC_POLL_INTERVAL_MS = 5 * 60 * 1000;
+const AUTO_SYNC_POLL_INTERVAL_MS = 2 * 60 * 1000;
 
 interface PluginData {
   settings?: Partial<RemoteSyncSettings>;
@@ -782,11 +782,18 @@ export default class RemoteSyncPlugin extends Plugin {
       // 启动同步：拉取其它设备在本设备离线期间的远端改动
       void this.syncAutomatically();
 
+      // 窗口从后台切回前台/从休眠唤醒时，立即补一次同步，覆盖关闭期间其它设备
+      // 或外部程序改动了文件但本地没有 vault 事件的漏感知场景。syncAutomatically
+      // 自带 stale 守卫，频繁 focus 不会引发重复执行。
+      this.registerDomEvent(globalThis as unknown as Window, "focus", () => {
+        void this.syncAutomatically();
+      });
+
       // 定时轮询：补齐"本地无文件事件但远端已变"的漏感知场景
       this.registerInterval(
-        window.setInterval(() => {
+        setInterval(() => {
           void this.syncAutomatically();
-        }, AUTO_SYNC_POLL_INTERVAL_MS)
+        }, AUTO_SYNC_POLL_INTERVAL_MS) as unknown as number
       );
     });
   }
