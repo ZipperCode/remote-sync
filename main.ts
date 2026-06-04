@@ -39,12 +39,14 @@ class SyncConfirmationModal extends Modal {
   constructor(
     app: App,
     private readonly confirmations: SyncConfirmation[],
-    private readonly onSubmit: (decisions: SyncConfirmationDecision[]) => void
+    private readonly onSubmit: (decisions: SyncConfirmationDecision[]) => void,
+    private readonly onOpenStateChange?: (open: boolean) => void
   ) {
     super(app);
   }
 
   onOpen(): void {
+    this.onOpenStateChange?.(true);
     const { contentEl } = this;
     contentEl.empty();
     contentEl.createEl("h2", { text: "处理同步确认" });
@@ -114,6 +116,11 @@ class SyncConfirmationModal extends Modal {
             this.onSubmit(decisions);
           })
       );
+  }
+
+  onClose(): void {
+    this.onOpenStateChange?.(false);
+    this.contentEl.empty();
   }
 
   private defaultAction(confirmation: SyncConfirmation): SyncConfirmationDecision["action"] {
@@ -279,6 +286,7 @@ export default class RemoteSyncPlugin extends Plugin {
   private syncStartedAt: number | null = null;
   private isUpdatingPlugin = false;
   private lastSyncLabel = "空闲";
+  private confirmationModalOpen = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -438,7 +446,7 @@ export default class RemoteSyncPlugin extends Plugin {
     const didRun = await this.runSync({
       showBusyNotice: false,
       showConfigNotice: false,
-      confirmManually: false
+      confirmManually: true
     });
     return didRun ? "completed" : "skipped";
   }
@@ -520,14 +528,24 @@ export default class RemoteSyncPlugin extends Plugin {
   }
 
   private openConfirmationModal(confirmations: SyncConfirmation[]): void {
-    new SyncConfirmationModal(this.app, confirmations, (confirmationDecisions) => {
-      void this.runSync({
-        showBusyNotice: true,
-        showConfigNotice: true,
-        confirmManually: false,
-        confirmationDecisions
-      });
-    }).open();
+    if (this.confirmationModalOpen) {
+      return;
+    }
+    new SyncConfirmationModal(
+      this.app,
+      confirmations,
+      (confirmationDecisions) => {
+        void this.runSync({
+          showBusyNotice: true,
+          showConfigNotice: true,
+          confirmManually: false,
+          confirmationDecisions
+        });
+      },
+      (open) => {
+        this.confirmationModalOpen = open;
+      }
+    ).open();
   }
 
   private openFirstSyncModal(): void {

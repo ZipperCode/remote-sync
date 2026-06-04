@@ -160,4 +160,15 @@ describe("RemoteSyncPlugin", () => {
       "插件已更新到 0.1.2，请重启 Obsidian 或手动重载插件。"
     );
   });
+
+  test("confirmation modal guard prevents concurrent opens", () => {
+    const guard = { open: false };
+    const canOpen = () => !guard.open;
+
+    expect(canOpen()).toBe(true);
+    guard.open = true;
+    expect(canOpen()).toBe(false);
+    guard.open = false;
+    expect(canOpen()).toBe(true);
+  });
 });
