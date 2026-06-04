@@ -1,16 +1,86 @@
 import { describe, expect, test, vi } from "vitest";
 
-vi.mock("obsidian", () => ({
-  App: class {},
-  Modal: class {},
-  Notice: vi.fn(),
-  Platform: { isMobile: false },
-  Plugin: class {},
-  PluginSettingTab: class {},
-  Setting: class {},
-  TextFileView: class {},
-  requestUrl: vi.fn()
-}));
+const modalHooks = vi.hoisted(() => {
+  return {
+    openCount: 0,
+    // The most recently opened modal instance, so tests can drive its
+    // close() to emulate the user dismissing the dialog.
+    lastInstance: null as null | { close: () => void },
+    reset(): void {
+      this.openCount = 0;
+      this.lastInstance = null;
+    }
+  };
+});
+
+function createChainableEl(): any {
+  const el: any = {
+    empty: vi.fn(() => el),
+    createEl: vi.fn(() => createChainableEl()),
+    createDiv: vi.fn(() => createChainableEl()),
+    setText: vi.fn(() => el),
+    addClass: vi.fn(() => el),
+    addEventListener: vi.fn()
+  };
+  return el;
+}
+
+vi.mock("obsidian", () => {
+  class Modal {
+    contentEl = createChainableEl();
+    constructor(public app: unknown) {}
+    open(): void {
+      modalHooks.openCount += 1;
+      modalHooks.lastInstance = this as unknown as { close: () => void };
+      (this as unknown as { onOpen?: () => void }).onOpen?.();
+    }
+    close(): void {
+      (this as unknown as { onClose?: () => void }).onClose?.();
+    }
+  }
+
+  // Setting is fully chainable; dropdown/button callbacks receive chainable
+  // stubs so SyncConfirmationModal.onOpen can render without throwing.
+  class Setting {
+    constructor(_containerEl?: unknown) {}
+    setName(): this {
+      return this;
+    }
+    setDesc(): this {
+      return this;
+    }
+    addDropdown(cb: (dropdown: unknown) => void): this {
+      const dropdown: any = {
+        addOption: vi.fn(() => dropdown),
+        setValue: vi.fn(() => dropdown),
+        onChange: vi.fn(() => dropdown)
+      };
+      cb(dropdown);
+      return this;
+    }
+    addButton(cb: (button: unknown) => void): this {
+      const button: any = {
+        setButtonText: vi.fn(() => button),
+        setCta: vi.fn(() => button),
+        onClick: vi.fn(() => button)
+      };
+      cb(button);
+      return this;
+    }
+  }
+
+  return {
+    App: class {},
+    Modal,
+    Notice: vi.fn(),
+    Platform: { isMobile: false },
+    Plugin: class {},
+    PluginSettingTab: class {},
+    Setting,
+    TextFileView: class {},
+    requestUrl: vi.fn()
+  };
+});
 
 vi.mock("../src/code-file-view", () => ({
   CODE_VIEW_TYPE: "remote-sync-code-view",
@@ -161,14 +231,93 @@ describe("RemoteSyncPlugin", () => {
     );
   });
 
-  test("confirmation modal guard prevents concurrent opens", () => {
-    const guard = { open: false };
-    const canOpen = () => !guard.open;
+  // Builds a plugin instance wired for runSync: configured WebDAV settings so
+  // assertConfigured passes, a stubbed engine whose syncOnce always reports a
+  // pending confirmation, and a status-bar element we can inspect.
+  async function buildConfirmationPlugin() {
+    const { Notice } = await import("obsidian");
+    vi.mocked(Notice).mockClear();
+    modalHooks.reset();
 
-    expect(canOpen()).toBe(true);
-    guard.open = true;
-    expect(canOpen()).toBe(false);
-    guard.open = false;
-    expect(canOpen()).toBe(true);
+    const { default: RemoteSyncPlugin } = await import("../main.ts");
+    const plugin = new RemoteSyncPlugin();
+    const statusText = vi.fn();
+
+    const confirmation = {
+      path: "notes/conflict.md",
+      conflictType: "binary" as const,
+      reason: "same-mtime-different-size" as const,
+      local: { path: "notes/conflict.md" },
+      remote: { path: "notes/conflict.md" }
+    };
+    const result = {
+      plan: {
+        operations: [],
+        confirmations: [confirmation],
+        conflicts: [],
+        skipped: [],
+        initialSyncRequired: false
+      },
+      summary: {
+        uploaded: 0,
+        downloaded: 0,
+        deletedLocal: 0,
+        deletedRemote: 0,
+        merged: 0,
+        skipped: 0,
+        conflicts: 0,
+        pendingConfirmations: 1,
+        backedUp: 0,
+        failures: 0,
+        initialSyncRequired: false,
+        failureDetails: []
+      }
+    };
+    const syncOnce = vi.fn(async () => result);
+
+    Object.assign(plugin, {
+      manifest: { id: "obsidian-webdav-sync", version: "0.1.1" },
+      statusBarItemEl: { setText: statusText },
+      settings: {
+        provider: "webdav",
+        baseUrl: "https://example.com/dav",
+        customHeaders: ""
+      },
+      createEngine: () => ({ syncOnce })
+    });
+
+    return { plugin, statusText, syncOnce };
+  }
+
+  test("confirmation modal guard prevents concurrent opens", async () => {
+    const { plugin } = await buildConfirmationPlugin();
+
+    // Two automatic syncs while the modal is still open should only surface one
+    // dialog, because the guard is set synchronously before .open().
+    await (plugin as unknown as { syncAutomatically: () => Promise<unknown> }).syncAutomatically();
+    await (plugin as unknown as { syncAutomatically: () => Promise<unknown> }).syncAutomatically();
+
+    expect(modalHooks.openCount).toBe(1);
+  });
+
+  test("auto sync degrades to status bar after the user dismisses the modal", async () => {
+    const { plugin, statusText } = await buildConfirmationPlugin();
+
+    // First auto sync opens the confirmation modal.
+    await (plugin as unknown as { syncAutomatically: () => Promise<unknown> }).syncAutomatically();
+    expect(modalHooks.openCount).toBe(1);
+
+    // The user closes the modal without making a decision (X / Esc).
+    modalHooks.lastInstance?.close();
+
+    // Subsequent automatic syncs must NOT reopen the modal; they degrade to a
+    // status-bar hint instead.
+    statusText.mockClear();
+    await (plugin as unknown as { syncAutomatically: () => Promise<unknown> }).syncAutomatically();
+
+    expect(modalHooks.openCount).toBe(1);
+    expect(statusText).toHaveBeenCalledWith(
+      expect.stringContaining("待确认 1 个，点击同步处理")
+    );
   });
 });

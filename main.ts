@@ -35,18 +35,18 @@ interface PluginData {
 
 class SyncConfirmationModal extends Modal {
   private readonly decisions = new Map<string, SyncConfirmationDecision["action"]>();
+  private submitted = false;
 
   constructor(
     app: App,
     private readonly confirmations: SyncConfirmation[],
     private readonly onSubmit: (decisions: SyncConfirmationDecision[]) => void,
-    private readonly onOpenStateChange?: (open: boolean) => void
+    private readonly onDismissWithoutSubmit?: () => void
   ) {
     super(app);
   }
 
   onOpen(): void {
-    this.onOpenStateChange?.(true);
     const { contentEl } = this;
     contentEl.empty();
     contentEl.createEl("h2", { text: "处理同步确认" });
@@ -92,6 +92,7 @@ class SyncConfirmationModal extends Modal {
                 ? "accept-delete"
                 : this.decisions.get(confirmation.path) ?? "skip"
             }));
+            this.submitted = true;
             this.close();
             this.onSubmit(decisions);
           })
@@ -100,6 +101,7 @@ class SyncConfirmationModal extends Modal {
         button
           .setButtonText("全部跳过")
           .onClick(() => {
+            this.submitted = true;
             this.close();
           })
       )
@@ -112,6 +114,7 @@ class SyncConfirmationModal extends Modal {
               path: confirmation.path,
               action: this.decisions.get(confirmation.path) ?? "skip"
             }));
+            this.submitted = true;
             this.close();
             this.onSubmit(decisions);
           })
@@ -119,7 +122,9 @@ class SyncConfirmationModal extends Modal {
   }
 
   onClose(): void {
-    this.onOpenStateChange?.(false);
+    if (!this.submitted) {
+      this.onDismissWithoutSubmit?.();
+    }
     this.contentEl.empty();
   }
 
@@ -287,6 +292,7 @@ export default class RemoteSyncPlugin extends Plugin {
   private isUpdatingPlugin = false;
   private lastSyncLabel = "空闲";
   private confirmationModalOpen = false;
+  private autoConfirmationDismissed = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -446,7 +452,8 @@ export default class RemoteSyncPlugin extends Plugin {
     const didRun = await this.runSync({
       showBusyNotice: false,
       showConfigNotice: false,
-      confirmManually: true
+      confirmManually: true,
+      autoConfirm: true
     });
     return didRun ? "completed" : "skipped";
   }
@@ -455,6 +462,7 @@ export default class RemoteSyncPlugin extends Plugin {
     showBusyNotice: boolean;
     showConfigNotice: boolean;
     confirmManually: boolean;
+    autoConfirm?: boolean;
     confirmationDecisions?: SyncConfirmationDecision[];
     initialSyncMode?: InitialSyncMode;
   }): Promise<boolean> {
@@ -503,7 +511,21 @@ export default class RemoteSyncPlugin extends Plugin {
         return true;
       }
       if (options.confirmManually && result.plan.confirmations.length > 0) {
-        this.openConfirmationModal(result.plan.confirmations);
+        if (options.autoConfirm) {
+          // Automatic sync: if the user already dismissed a confirmation modal
+          // without acting on it, stop re-opening it on every poll and degrade
+          // to a status-bar hint instead so they can dismiss it for good.
+          if (this.autoConfirmationDismissed) {
+            this.updateStatus(`待确认 ${result.plan.confirmations.length} 个，点击同步处理`);
+          } else {
+            this.openConfirmationModal(result.plan.confirmations);
+          }
+        } else {
+          // Manual entry points always open the modal and clear the degraded
+          // state, since the user explicitly came to deal with the conflicts.
+          this.autoConfirmationDismissed = false;
+          this.openConfirmationModal(result.plan.confirmations);
+        }
       }
     } catch (error) {
       this.updateStatus("同步失败");
@@ -531,10 +553,17 @@ export default class RemoteSyncPlugin extends Plugin {
     if (this.confirmationModalOpen) {
       return;
     }
+    // Set the guard synchronously before opening so concurrent attempts are
+    // blocked regardless of when the Modal's onOpen callback fires.
+    this.confirmationModalOpen = true;
     new SyncConfirmationModal(
       this.app,
       confirmations,
       (confirmationDecisions) => {
+        // The user submitted a decision, so the conflicts are being handled
+        // and the degraded auto-confirmation state can be cleared.
+        this.confirmationModalOpen = false;
+        this.autoConfirmationDismissed = false;
         void this.runSync({
           showBusyNotice: true,
           showConfigNotice: true,
@@ -542,8 +571,12 @@ export default class RemoteSyncPlugin extends Plugin {
           confirmationDecisions
         });
       },
-      (open) => {
-        this.confirmationModalOpen = open;
+      () => {
+        // The user closed the modal without acting on it. Release the guard and
+        // remember the dismissal so automatic syncs degrade to a status hint
+        // instead of re-opening this modal on every poll.
+        this.confirmationModalOpen = false;
+        this.autoConfirmationDismissed = true;
       }
     ).open();
   }
