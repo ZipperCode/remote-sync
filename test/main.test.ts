@@ -397,6 +397,27 @@ describe("RemoteSyncPlugin", () => {
     expect(byPath.get("t2.md")).toBe("use-remote");
   });
 
+  test("group button '全部自动合并' sets auto-merge only for merge candidates and keeps others at their default", async () => {
+    // Mixed text group: one mergeable candidate (suggestedKind: "merge") and one
+    // non-mergeable text conflict. "全部自动合并" must set auto-merge ONLY for the
+    // mergeable one; the non-mergeable entry keeps its per-item default decision
+    // (text-overlap defaults to "skip"), never auto-merge.
+    const confirmations = [
+      { path: "merge.md", conflictType: "text-auto-merge", reason: "both-changed", suggestedKind: "merge", local: { path: "merge.md" }, remote: { path: "merge.md" } },
+      { path: "overlap.md", conflictType: "text-overlap", reason: "both-changed", local: { path: "overlap.md" }, remote: { path: "overlap.md" } }
+    ];
+    const { plugin, submitted } = await buildGroupedConfirmationPlugin(confirmations);
+
+    await (plugin as unknown as { syncNow: () => Promise<void> }).syncNow();
+    modalHooks.click("全部自动合并");
+
+    const byPath = new Map(submitted.map((d) => [d.path, d.action]));
+    expect(byPath.get("merge.md")).toBe("auto-merge");
+    // The non-mergeable entry must NOT be forced to auto-merge.
+    expect(byPath.get("overlap.md")).not.toBe("auto-merge");
+    expect(byPath.get("overlap.md")).toBe("skip");
+  });
+
   test("confirmation modal guard prevents concurrent opens", async () => {
     const { plugin } = await buildConfirmationPlugin();
 
