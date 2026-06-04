@@ -8,7 +8,7 @@ import {
 } from "./sync-planner";
 import { SyncStateStore } from "./sync-state-store";
 import { normalizeVaultPath, REMOTE_SYNC_TRASH_DIR, shouldIgnorePath } from "./path-utils";
-import { NonMergeableConflictPolicy, SyncConfirmationAction, SyncSafetyMode } from "./sync-types";
+import { NonMergeableConflictPolicy, RenameMapping, SyncConfirmationAction, SyncSafetyMode } from "./sync-types";
 import { decodeTextContent, encodeTextContent, mergeTextContent } from "./text-merge";
 import { buildConflictCopyPath } from "./device-id";
 
@@ -16,6 +16,7 @@ export type InitialSyncMode = "ask" | "merge" | "use-local" | "use-remote";
 
 export interface SyncOnceOptions {
   initialSyncMode?: InitialSyncMode;
+  renames?: RenameMapping[];
 }
 
 export interface SyncLocalStore {
