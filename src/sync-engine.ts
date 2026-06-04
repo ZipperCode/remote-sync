@@ -135,14 +135,34 @@ export class SyncEngine {
       });
     }
 
+    const summary: SyncSummary = {
+      uploaded: 0,
+      downloaded: 0,
+      deletedLocal: 0,
+      deletedRemote: 0,
+      merged: 0,
+      skipped: plan.skipped.length,
+      conflicts: 0,
+      pendingConfirmations: 0,
+      backedUp: 0,
+      failures: 0,
+      initialSyncRequired: Boolean(plan.initialSyncRequired),
+      failureDetails: []
+    };
+
+    if (plan.initialSyncRequired) {
+      return { plan, summary };
+    }
+
     // 整轮同步共用同一个 trashBatch：rename 搬迁的备份与后续 plan.operations 的备份
-    // 都落入同一批次目录。必须在 applyRenames 之前创建，以便备份远端旧文件时复用。
+    // 都落入同一批次目录。此处已确定非 initialSyncRequired（上方已早返回），
+    // 故仅在确实要执行操作时才分配批次名，不会在"只返回计划"的纯查询路径上凭空生成。
     const trashBatch = createTrashBatchName();
 
     const renameHandledPaths = new Set<string>();
     const renameFailures: SyncFailureDetail[] = [];
     let renameBackups = 0;
-    if (!plan.initialSyncRequired && options.renames && options.renames.length > 0) {
+    if (options.renames && options.renames.length > 0) {
       renameBackups = await this.applyRenames(
         options.renames,
         localSnapshot,
@@ -161,31 +181,12 @@ export class SyncEngine {
       }
     }
 
-    const summary: SyncSummary = {
-      uploaded: 0,
-      downloaded: 0,
-      deletedLocal: 0,
-      deletedRemote: 0,
-      merged: 0,
-      skipped: plan.skipped.length,
-      conflicts: 0,
-      pendingConfirmations: 0,
-      backedUp: 0,
-      failures: 0,
-      initialSyncRequired: Boolean(plan.initialSyncRequired),
-      failureDetails: []
-    };
-
     for (const failure of renameFailures) {
       summary.failureDetails.push(failure);
       summary.failures += 1;
     }
     // rename 搬迁删除远端旧文件前产生的本地备份计入总备份数。
     summary.backedUp += renameBackups;
-
-    if (plan.initialSyncRequired) {
-      return { plan, summary };
-    }
 
     const approvedOperations = this.buildApprovedOperations(plan.confirmations, decisions);
     const approvedPaths = new Set(approvedOperations.map(({ confirmation }) => confirmation.path));
