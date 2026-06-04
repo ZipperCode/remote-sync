@@ -135,6 +135,26 @@ export class SyncEngine {
       });
     }
 
+    const renameHandledPaths = new Set<string>();
+    const renameFailures: SyncFailureDetail[] = [];
+    if (!plan.initialSyncRequired && options.renames && options.renames.length > 0) {
+      await this.applyRenames(
+        options.renames,
+        localSnapshot,
+        remoteSnapshot,
+        renameHandledPaths,
+        renameFailures
+      );
+      if (renameHandledPaths.size > 0) {
+        plan = {
+          ...plan,
+          operations: plan.operations.filter((op) => !renameHandledPaths.has(op.path)),
+          confirmations: plan.confirmations.filter((c) => !renameHandledPaths.has(c.path)),
+          conflicts: plan.conflicts.filter((c) => !renameHandledPaths.has(c.path))
+        };
+      }
+    }
+
     const summary: SyncSummary = {
       uploaded: 0,
       downloaded: 0,
@@ -149,6 +169,11 @@ export class SyncEngine {
       initialSyncRequired: Boolean(plan.initialSyncRequired),
       failureDetails: []
     };
+
+    for (const failure of renameFailures) {
+      summary.failureDetails.push(failure);
+      summary.failures += 1;
+    }
 
     if (plan.initialSyncRequired) {
       return { plan, summary };
@@ -581,6 +606,46 @@ export class SyncEngine {
     );
 
     return backups;
+  }
+
+  private async applyRenames(
+    renames: RenameMapping[],
+    localSnapshot: FileEntry[],
+    remoteSnapshot: FileEntry[],
+    handled: Set<string>,
+    failures: SyncFailureDetail[]
+  ): Promise<void> {
+    const localByPath = new Map(localSnapshot.map((entry) => [entry.path, entry]));
+    const remoteByPath = new Map(remoteSnapshot.map((entry) => [entry.path, entry]));
+
+    for (const { from, to } of renames) {
+      if (from === to) {
+        continue;
+      }
+      const localTarget = localByPath.get(to);
+      const remoteSource = remoteByPath.get(from);
+      const remoteTargetExists = remoteByPath.has(to);
+
+      // 本地无新文件（改名后又删）、远端无旧文件（远端从无此文件）、
+      // 或远端已存在新文件（避免覆盖对端）—— 任一成立则不搬迁，交给正常计划处理。
+      if (!localTarget || !remoteSource || remoteTargetExists) {
+        continue;
+      }
+
+      try {
+        const content = await this.runStage(to, "upload", () => this.local.readFile(to));
+        await this.runStage(to, "upload", () => this.remote.writeFile(to, content, localTarget));
+        await this.runStage(from, "delete-remote", () => this.remote.deleteFile(from));
+        handled.add(from);
+        handled.add(to);
+      } catch (error) {
+        if (error instanceof SyncOperationFailure) {
+          failures.push(error.detail);
+        } else {
+          failures.push({ path: to, stage: "upload", message: formatError(error) });
+        }
+      }
+    }
   }
 
   private recordFailure(

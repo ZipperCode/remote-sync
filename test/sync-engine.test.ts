@@ -542,6 +542,60 @@ describe("SyncEngine", () => {
     expect(remote.written).toContain("note.md");
     expect(adapter.value).toContain("note.md");
   });
+
+  test("rename moves remote file and skips delete/upload in safe mode", async () => {
+    const local = new FakeStore([file("new.md", 200)], { "new.md": "hello" });
+    const remote = new FakeStore([file("old.md", 100)], { "old.md": "hello" });
+
+    const stateStore = new SyncStateStore(
+      new MemoryAdapter(
+        JSON.stringify({
+          version: 1,
+          lastSyncTime: 50,
+          previousEntries: [previous(file("old.md", 100))]
+        })
+      )
+    );
+
+    const engine = new SyncEngine(local, remote, stateStore, {
+      ignorePatterns: [],
+      syncSafetyMode: "safe"
+    });
+
+    const result = await engine.syncOnce([], {
+      renames: [{ from: "old.md", to: "new.md" }]
+    });
+
+    expect(remote.written).toContain("new.md");
+    expect(remote.deleted).toContain("old.md");
+    expect(result.summary.pendingConfirmations).toBe(0);
+    const remotePaths = (await remote.snapshot()).map((e) => e.path).sort();
+    expect(remotePaths).toEqual(["new.md"]);
+  });
+
+  test("rename falls back to normal plan when remote lacks the source", async () => {
+    const local = new FakeStore([file("renamed.md", 200)], { "renamed.md": "data" });
+    const remote = new FakeStore([], {});
+
+    const stateStore = new SyncStateStore(
+      new MemoryAdapter(
+        JSON.stringify({ version: 1, lastSyncTime: 50, previousEntries: [] })
+      )
+    );
+
+    const engine = new SyncEngine(local, remote, stateStore, {
+      ignorePatterns: [],
+      syncSafetyMode: "safe"
+    });
+
+    const result = await engine.syncOnce([], {
+      renames: [{ from: "fresh.md", to: "renamed.md" }]
+    });
+
+    expect(remote.deleted).not.toContain("fresh.md");
+    expect(remote.written).toContain("renamed.md");
+    expect(result.summary.pendingConfirmations).toBe(0);
+  });
 });
 
 function entry(path: string, content: string, mtime: number): FileEntry {
