@@ -119,4 +119,39 @@ describe("AutoSyncController", () => {
     expect(counts).toEqual([]);
     expect(sync).not.toHaveBeenCalled();
   });
+
+  test("records rename mappings and hands them out once", async () => {
+    const sync = vi.fn(async () => "completed" as const);
+    const controller = new AutoSyncController({
+      sync,
+      shouldIgnorePath: () => false
+    });
+
+    controller.handleVaultRename("b.md", "a.md");
+    expect(controller.takePendingRenames()).toEqual([{ from: "a.md", to: "b.md" }]);
+    expect(controller.takePendingRenames()).toEqual([]);
+  });
+
+  test("collapses chained renames a -> b -> c into a -> c", async () => {
+    const sync = vi.fn(async () => "completed" as const);
+    const controller = new AutoSyncController({
+      sync,
+      shouldIgnorePath: () => false
+    });
+
+    controller.handleVaultRename("b.md", "a.md");
+    controller.handleVaultRename("c.md", "b.md");
+    expect(controller.takePendingRenames()).toEqual([{ from: "a.md", to: "c.md" }]);
+  });
+
+  test("ignores rename when both paths are ignored", async () => {
+    const sync = vi.fn(async () => "completed" as const);
+    const controller = new AutoSyncController({
+      sync,
+      shouldIgnorePath: (p) => p.startsWith(".obsidian/")
+    });
+
+    controller.handleVaultRename(".obsidian/new.json", ".obsidian/old.json");
+    expect(controller.takePendingRenames()).toEqual([]);
+  });
 });

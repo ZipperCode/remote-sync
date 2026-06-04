@@ -1,3 +1,5 @@
+import { RenameMapping } from "./sync-types";
+
 export const AUTO_SYNC_DEBOUNCE_MS = 3000;
 
 export type AutoSyncRunResult = "completed" | "busy" | "skipped";
@@ -15,6 +17,7 @@ export class AutoSyncController {
   private syncInProgress = false;
   private pendingAfterCurrentSync = false;
   private pendingPaths = new Set<string>();
+  private pendingRenames = new Map<string, string>();
 
   constructor(private readonly options: AutoSyncControllerOptions) {
     this.debounceMs = options.debounceMs ?? AUTO_SYNC_DEBOUNCE_MS;
@@ -35,9 +38,34 @@ export class AutoSyncController {
       return;
     }
 
+    this.recordRename(oldPath, path);
     this.pendingPaths.add(path);
     this.options.onPendingChange?.(this.pendingPaths.size);
     this.requestSync();
+  }
+
+  takePendingRenames(): RenameMapping[] {
+    const renames = [...this.pendingRenames.entries()].map(([from, to]) => ({ from, to }));
+    this.pendingRenames.clear();
+    return renames;
+  }
+
+  private recordRename(from: string, to: string): void {
+    // 链式合并：若已存在 X -> from，则更新为 X -> to（删除中间态 from）。
+    let origin = from;
+    for (const [existingFrom, existingTo] of this.pendingRenames.entries()) {
+      if (existingTo === from) {
+        origin = existingFrom;
+        this.pendingRenames.delete(existingFrom);
+        break;
+      }
+    }
+    if (origin === to) {
+      // 改回原名，净效果为空：移除该链。
+      this.pendingRenames.delete(origin);
+      return;
+    }
+    this.pendingRenames.set(origin, to);
   }
 
   dispose(): void {
