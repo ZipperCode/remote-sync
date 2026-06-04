@@ -121,7 +121,13 @@ describe("SyncEngine", () => {
     expect(remote.written).toContain("local.md");
     expect(local.written).toEqual(["remote.md"]);
     expect(remote.deleted).toEqual([]);
-    expect(adapter.value).not.toContain("local.md");
+    // 已成功的 local.md/remote.md 推进基线；待确认的 deleted.md 保留旧基线。
+    const saved = stateStore.getPreviousEntries();
+    expect(saved.find((e) => e.path === "local.md")).toBeTruthy();
+    expect(saved.find((e) => e.path === "remote.md")).toBeTruthy();
+    const deleted = saved.find((e) => e.path === "deleted.md");
+    expect(deleted?.local?.mtime).toBe(100);
+    expect(deleted?.remote?.mtime).toBe(100);
   });
 
   test("executes approved delete confirmation and saves successful state", async () => {
@@ -177,7 +183,6 @@ describe("SyncEngine", () => {
     const stateStore = new SyncStateStore(adapter);
     const local = new FakeStore([]);
     const remote = new FakeStore([oldDeleted]);
-    const before = adapter.value;
     remote.failDeletes = "deleted.md";
     const engine = new SyncEngine(local, remote, stateStore, { ignorePatterns: [] });
 
@@ -194,7 +199,11 @@ describe("SyncEngine", () => {
     ]);
     expect(local.written.some((path) => path.startsWith(".remote-sync-trash/") && path.includes("/remote/deleted.md"))).toBe(true);
     expect(remote.deleted).toEqual([]);
-    expect(adapter.value).toBe(before);
+    // 删除失败 -> deleted.md 旧基线必须保留（mtime 100），不能丢，否则冲突消失。
+    const saved = stateStore.getPreviousEntries();
+    const deleted = saved.find((e) => e.path === "deleted.md");
+    expect(deleted?.local?.mtime).toBe(100);
+    expect(deleted?.remote?.mtime).toBe(100);
   });
 
   test("requires a first sync choice before writing without a baseline", async () => {
@@ -236,7 +245,7 @@ describe("SyncEngine", () => {
     expect(adapter.value).not.toContain("remote.md");
   });
 
-  test("executes safe operations but keeps state unchanged when manual confirmations are pending", async () => {
+  test("persists resolved operations but preserves baseline for pending confirmations", async () => {
     const old = file("note.md", 100, 10);
     const localOnly = file("local.md", 200);
     const adapter = new MemoryAdapter(
@@ -257,7 +266,44 @@ describe("SyncEngine", () => {
     expect(result.summary.uploaded).toBe(1);
     expect(result.summary.downloaded).toBe(0);
     expect(remote.written).toContain("local.md");
-    expect(adapter.value).toBe(before);
+    // 语义变更：不再"完全不变"。已成功的 local.md upload 推进了基线，
+    // 而待确认的 note.md 保留旧基线（mtime 100），不被当前快照覆盖。
+    expect(adapter.value).not.toBe(before);
+    expect(adapter.value).toContain("local.md");
+    const saved = stateStore.getPreviousEntries();
+    expect(saved.find((e) => e.path === "local.md")).toBeTruthy();
+    const note = saved.find((e) => e.path === "note.md");
+    expect(note?.local?.mtime).toBe(100);
+    expect(note?.remote?.mtime).toBe(100);
+  });
+
+  test("persists baseline for resolved operations even when a confirmation stays pending", async () => {
+    const old = file("note.md", 100, 10);
+    const localOnly = file("local.md", 200);
+    const adapter = new MemoryAdapter(
+      JSON.stringify({ version: 1, lastSyncTime: 123, previousEntries: [previous(old)] })
+    );
+    const stateStore = new SyncStateStore(adapter);
+    // note.md changed on both sides -> pending confirmation in manual mode.
+    // local.md is local-only -> auto-executed upload (a resolved operation).
+    const local = new FakeStore([file("note.md", 200, 11), localOnly]);
+    const remote = new FakeStore([file("note.md", 200, 12)]);
+    const engine = new SyncEngine(local, remote, stateStore, {
+      ignorePatterns: [],
+      syncSafetyMode: "manual"
+    });
+
+    const result = await engine.syncOnce();
+
+    expect(result.summary.pendingConfirmations).toBe(1);
+
+    // 关键：已成功的操作路径必须落盘（基线推进），否则下次重复执行。
+    const saved = stateStore.getPreviousEntries();
+    expect(saved.find((e) => e.path === "local.md")).toBeTruthy();
+    // note.md 是待确认冲突，其旧基线必须保留（mtime 100），不能被当前快照覆盖。
+    const note = saved.find((e) => e.path === "note.md");
+    expect(note?.local?.mtime).toBe(100);
+    expect(note?.remote?.mtime).toBe(100);
   });
 
   test("backs up local file before overwriting it with a remote download", async () => {
@@ -391,7 +437,6 @@ describe("SyncEngine", () => {
     const stateStore = new SyncStateStore(adapter);
     const local = new FakeStore([file("note.md", 300, 24)], { "note.md": "alpha local\nbeta\n" });
     const remote = new FakeStore([file("note.md", 200, 25)], { "note.md": "alpha\nbeta remote\n" });
-    const before = adapter.value;
     const engine = new SyncEngine(local, remote, stateStore, {
       ignorePatterns: [],
       syncSafetyMode: "manual"
@@ -406,7 +451,12 @@ describe("SyncEngine", () => {
     ]);
     expect(local.written).toEqual([]);
     expect(remote.written).toEqual([]);
-    expect(adapter.value).toBe(before);
+    // 待确认的 note.md 保留旧基线（含 mergeBase），不被当前快照覆盖。
+    const saved = stateStore.getPreviousEntries();
+    const note = saved.find((e) => e.path === "note.md");
+    expect(note?.local?.mtime).toBe(100);
+    expect(note?.remote?.mtime).toBe(100);
+    expect(note?.mergeBase?.content).toBe("alpha\nbeta\n");
   });
 
   test("keeps non-mergeable conflicts pending in manual mode", async () => {
@@ -421,7 +471,6 @@ describe("SyncEngine", () => {
     const stateStore = new SyncStateStore(adapter);
     const local = new FakeStore([file("big.md", 300, 70 * 1024)], { "big.md": "local large" });
     const remote = new FakeStore([file("big.md", 200, 70 * 1024)], { "big.md": "remote large" });
-    const before = adapter.value;
     const engine = new SyncEngine(local, remote, stateStore, {
       ignorePatterns: [],
       syncSafetyMode: "manual",
@@ -436,7 +485,12 @@ describe("SyncEngine", () => {
       expect.objectContaining({ path: "big.md", conflictType: "text-too-large" })
     ]);
     expect(remote.readText("big.md")).toBe("remote large");
-    expect(adapter.value).toBe(before);
+    // 待确认的 big.md 保留旧基线（含 mergeBase），不被当前快照覆盖。
+    const saved = stateStore.getPreviousEntries();
+    const big = saved.find((e) => e.path === "big.md");
+    expect(big?.local?.mtime).toBe(100);
+    expect(big?.remote?.mtime).toBe(100);
+    expect(big?.mergeBase?.content).toBe("base\n");
   });
 
   test("does not overwrite when backup fails", async () => {
@@ -505,7 +559,6 @@ describe("SyncEngine", () => {
     const local = new FakeStore([file("note.md", 300, 24)], { "note.md": "alpha local\nbeta\n" });
     const remote = new FakeStore([file("note.md", 200, 25)], { "note.md": "alpha\nbeta remote\n" });
     local.failWritesUnder = "note.md";
-    const before = adapter.value;
     const engine = new SyncEngine(local, remote, stateStore, { ignorePatterns: [] });
 
     const result = await engine.syncOnce();
@@ -519,7 +572,12 @@ describe("SyncEngine", () => {
         message: "Blocked write: note.md"
       })
     ]);
-    expect(adapter.value).toBe(before);
+    // merge 写失败 -> note.md 旧基线（含 mergeBase）必须保留，不能推进，否则丢冲突。
+    const saved = stateStore.getPreviousEntries();
+    const note = saved.find((e) => e.path === "note.md");
+    expect(note?.local?.mtime).toBe(100);
+    expect(note?.remote?.mtime).toBe(100);
+    expect(note?.mergeBase?.content).toBe("alpha\nbeta\n");
   });
 
   test("executes approved confirmation choices after recomputing the plan", async () => {
@@ -611,7 +669,6 @@ describe("SyncEngine", () => {
       })
     );
     const stateStore = new SyncStateStore(adapter);
-    const before = adapter.value;
     const engine = new SyncEngine(local, remote, stateStore, {
       ignorePatterns: [],
       syncSafetyMode: "safe"
@@ -642,9 +699,14 @@ describe("SyncEngine", () => {
     // 写失败发生在备份之前，没有 trash 备份产生。
     expect(local.written.some((p) => p.startsWith(".remote-sync-trash/"))).toBe(false);
     expect(result.summary.backedUp).toBe(0);
-    // 有失败 -> 状态不保存（adapter 内容保持不变，且不含 new.md）。
-    expect(adapter.value).toBe(before);
+    // new.md 上传失败（无旧基线）-> 被丢弃，不会被误记为已同步；
+    // old.md 仍待确认（远端尚存、本地无）-> 旧基线（mtime 100）保留，数据不丢。
     expect(adapter.value).not.toContain("new.md");
+    const saved = stateStore.getPreviousEntries();
+    expect(saved.find((e) => e.path === "new.md")).toBeFalsy();
+    const oldEntry = saved.find((e) => e.path === "old.md");
+    expect(oldEntry?.local?.mtime).toBe(100);
+    expect(oldEntry?.remote?.mtime).toBe(100);
   });
 
   test("rename backs up the remote source and keeps data when deleting it fails", async () => {

@@ -221,7 +221,13 @@ export class SyncEngine {
     summary.pendingConfirmations = pendingConfirmations.length;
     summary.conflicts = pendingConfirmations.length;
 
-    if (summary.failures === 0 && summary.pendingConfirmations === 0) {
+    // 即便存在待确认/失败，也要落盘已成功的部分：对已处理路径推进基线，对
+    // 待确认与失败路径保留旧基线，避免"一个未决导致整体重算、永远待确认"。
+    const unresolvedPaths = new Set<string>([
+      ...pendingConfirmations.map((confirmation) => confirmation.path),
+      ...summary.failureDetails.map((failure) => failure.path)
+    ]);
+    {
       const [updatedLocalSnapshot, updatedRemoteSnapshot] = await Promise.all([
         this.local.snapshot(),
         this.remote.snapshot()
@@ -236,7 +242,8 @@ export class SyncEngine {
             } catch {
               return undefined;
             }
-          }
+          },
+          unresolvedPaths
         );
       } catch (error) {
         this.recordFailure(summary, { path: "<sync-state>" }, error, "save-state");
