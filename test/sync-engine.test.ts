@@ -106,7 +106,10 @@ describe("SyncEngine", () => {
     const remote = new FakeStore([file("remote.md", 200), oldDeleted]);
     const engine = new SyncEngine(local, remote, stateStore, {
       ignorePatterns: [],
-      syncSafetyMode: "manual"
+      syncSafetyMode: "manual",
+      // 设为 1 让占比保护不介入，纯粹验证 manual 档把删除转确认的行为，
+      // 避免依赖 protectLargeAutoDeleteBatch 的副作用掩盖 mode 判定。
+      maxAutoDeleteRatio: 1
     });
 
     const result = await engine.syncOnce();
