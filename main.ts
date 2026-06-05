@@ -147,11 +147,14 @@ class SyncConfirmationModal extends Modal {
     new Setting(contentEl)
       .addButton((button) =>
         button
-          .setButtonText("接受所有远端删除")
+          .setButtonText("接受所有删除")
           .onClick(() => {
+            // 接受任一方向的单边删除（本地删→删远端、远端删→删本地）。
+            // accept-delete 在引擎里按 local/remote 哪边存在自动决定删哪边，
+            // 故对所有单边删除冲突通用；非删除冲突保持其原决策不变。
             const decisions = this.confirmations.map((confirmation) => ({
               path: confirmation.path,
-              action: this.isRemoteDeleteConfirmation(confirmation)
+              action: this.isDeleteConfirmation(confirmation)
                 ? "accept-delete"
                 : this.decisions.get(confirmation.path) ?? "skip"
             }));
@@ -242,12 +245,12 @@ class SyncConfirmationModal extends Modal {
     return "skip";
   }
 
-  private isRemoteDeleteConfirmation(confirmation: SyncConfirmation): boolean {
-    return Boolean(
-      confirmation.local &&
-      !confirmation.remote &&
-      (confirmation.reason === "remote-deleted" ||
-        confirmation.reason === "remote-deleted-local-changed")
+  private isDeleteConfirmation(confirmation: SyncConfirmation): boolean {
+    // 单边删除冲突：一端已删、另一端还在（local XOR remote），两个方向都算。
+    // 这类冲突可用 accept-delete 统一接受（引擎按存在的一侧反推删哪边）。
+    return (
+      confirmation.conflictType === "delete-vs-modify" &&
+      Boolean(confirmation.local) !== Boolean(confirmation.remote)
     );
   }
 

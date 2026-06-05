@@ -47,12 +47,12 @@ export const DEFAULT_SETTINGS: RemoteSyncSettings = {
   s3SessionToken: "",
   s3AddressingStyle: "path",
   ignorePatterns: [],
-  syncSafetyMode: "balanced",
+  syncSafetyMode: "auto",
   maxAutoDeleteRatio: 0.3,
   nonMergeableConflictPolicy: "newer-wins"
 };
 
-const SYNC_SAFETY_MODES: SyncSafetyMode[] = ["safe", "balanced", "manual"];
+const SYNC_SAFETY_MODES: SyncSafetyMode[] = ["auto", "manual"];
 const NON_MERGEABLE_CONFLICT_POLICIES: NonMergeableConflictPolicy[] = ["newer-wins"];
 
 export function normalizeRemoteSyncSettings(
@@ -73,6 +73,13 @@ export function normalizeRemoteSyncSettings(
   normalized.remoteRoot = normalizeRemoteRoot(normalized.remoteRoot);
   normalized.s3Prefix = normalizeRemoteRoot(normalized.s3Prefix);
   normalized.ignorePatterns = normalized.ignorePatterns ?? [];
+  // 历史 "safe" / "balanced" 两档统一迁移为 "auto"（简化为自动/手动两档）。
+  if (
+    (normalized.syncSafetyMode as string) === "safe" ||
+    (normalized.syncSafetyMode as string) === "balanced"
+  ) {
+    normalized.syncSafetyMode = "auto";
+  }
   if (!SYNC_SAFETY_MODES.includes(normalized.syncSafetyMode)) {
     normalized.syncSafetyMode = DEFAULT_SETTINGS.syncSafetyMode;
   }
@@ -192,11 +199,10 @@ export class RemoteSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("同步确认策略")
-      .setDesc("平衡模式会自动传播普通新增、修改和删除；不可合并的大文件冲突按下方策略自动处理。")
+      .setDesc("自动模式会自动传播新增、修改和删除，不可合并的冲突按修改时间较新的一侧自动处理；一端删除而另一端又有改动的冲突始终待确认，自动删除还受下方占比上限保护。")
       .addDropdown((dropdown) =>
         dropdown
-          .addOption("balanced", "平衡：只确认真实冲突")
-          .addOption("safe", "安全：删除和冲突都确认")
+          .addOption("auto", "自动：冲突按较新版本，删除自动同步")
           .addOption("manual", "手动：风险操作都确认")
           .setValue(this.plugin.settings.syncSafetyMode)
           .onChange(async (value) => {

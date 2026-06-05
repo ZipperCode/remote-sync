@@ -17,7 +17,7 @@ describe("settings compatibility", () => {
     expect(settings.remoteRoot).toBe("My Vault");
     expect(settings.baseUrl).toBe("https://dav.example.com");
     expect(settings.customHeaders).toBe("");
-    expect(settings.syncSafetyMode).toBe("balanced");
+    expect(settings.syncSafetyMode).toBe("auto");
     expect(settings.maxAutoDeleteRatio).toBe(0.3);
     expect(settings.nonMergeableConflictPolicy).toBe("newer-wins");
   });
@@ -32,8 +32,24 @@ describe("settings compatibility", () => {
       "My Vault"
     );
 
-    expect(settings.syncSafetyMode).toBe("balanced");
+    expect(settings.syncSafetyMode).toBe("auto");
     expect(settings.maxAutoDeleteRatio).toBe(1);
     expect(settings.nonMergeableConflictPolicy).toBe("newer-wins");
+  });
+
+  test("migrates legacy 'safe' mode to 'auto'", () => {
+    const settings = normalizeRemoteSyncSettings(
+      { syncSafetyMode: "safe" as never },
+      "My Vault"
+    );
+    expect(settings.syncSafetyMode).toBe("auto");
+  });
+
+  test("migrates legacy 'balanced' mode to 'auto'", () => {
+    const settings = normalizeRemoteSyncSettings(
+      { syncSafetyMode: "balanced" as never },
+      "My Vault"
+    );
+    expect(settings.syncSafetyMode).toBe("auto");
   });
 });

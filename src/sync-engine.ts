@@ -593,7 +593,7 @@ export class SyncEngine {
 
     // 把远端版本另存为用户可见的 conflict 副本。
     // 关键：副本必须同时写入本地和远端，否则下次同步时副本是 local-only 文件，
-    // 会被 planLocalOnly 在 balanced 模式下判定为 remote-deleted 而删除。
+    // 会被 planLocalOnly 在 auto 模式下判定为 remote-deleted 而删除。
     // 两端都写后，下次同步副本两端一致、previous 齐全，稳定收敛，且对端用户也能看到冲突。
     const conflictPath = buildConflictCopyPath(
       operation.path,
