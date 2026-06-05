@@ -421,6 +421,32 @@ describe("RemoteSyncPlugin", () => {
     expect(byPath.get("bin.png")).not.toBe("accept-delete");
   });
 
+  test("global '接受所有删除' button accepts both local and remote deletions", async () => {
+    // The bottom global button must accept deletions in BOTH directions:
+    // a local deletion (remote still present, reason "local-deleted" → delete
+    // remote) and a remote deletion (local still present, reason "remote-deleted"
+    // → delete local). The old button only handled remote deletions, leaving
+    // local deletions stuck. A non-delete conflict (binary) must stay untouched.
+    const confirmations = [
+      { path: "local-del.md", conflictType: "delete-vs-modify", reason: "local-deleted", remote: { path: "local-del.md" } },
+      { path: "remote-del.md", conflictType: "delete-vs-modify", reason: "remote-deleted", local: { path: "remote-del.md" } },
+      { path: "bin.png", conflictType: "binary", reason: "same-mtime-different-size", local: { path: "bin.png" }, remote: { path: "bin.png" } }
+    ];
+    const { plugin, submitted } = await buildGroupedConfirmationPlugin(confirmations);
+
+    await (plugin as unknown as { syncNow: () => Promise<void> }).syncNow();
+    expect(modalHooks.openCount).toBe(1);
+
+    modalHooks.click("接受所有删除");
+
+    const byPath = new Map(submitted.map((d) => [d.path, d.action]));
+    // Both deletion directions get accept-delete.
+    expect(byPath.get("local-del.md")).toBe("accept-delete");
+    expect(byPath.get("remote-del.md")).toBe("accept-delete");
+    // The binary conflict is not a deletion and must keep its default decision.
+    expect(byPath.get("bin.png")).not.toBe("accept-delete");
+  });
+
   test("group button '全部用远端' applies use-remote to all text-conflict entries", async () => {
     const confirmations = [
       { path: "t1.md", conflictType: "text-overlap", reason: "both-changed", local: { path: "t1.md" }, remote: { path: "t1.md" } },
