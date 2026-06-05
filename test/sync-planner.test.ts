@@ -40,13 +40,14 @@ describe("SyncPlanner", () => {
     expect(plan.conflicts).toEqual([]);
   });
 
-  test("requires confirmation before deleting remote file when local deletion is detected", () => {
+  test("requires confirmation before deleting remote file in manual mode", () => {
     const old = file("deleted.md", 100);
     const plan = planSync({
       local: [],
       remote: [old],
       previous: [previous(old)],
-      ignorePatterns: []
+      ignorePatterns: [],
+      syncSafetyMode: "manual"
     });
 
     expect(plan.operations).toEqual([]);
@@ -59,13 +60,14 @@ describe("SyncPlanner", () => {
     ]);
   });
 
-  test("requires confirmation before deleting local file when remote deletion is detected", () => {
+  test("requires confirmation before deleting local file in manual mode", () => {
     const old = file("deleted.md", 100);
     const plan = planSync({
       local: [old],
       remote: [],
       previous: [previous(old)],
-      ignorePatterns: []
+      ignorePatterns: [],
+      syncSafetyMode: "manual"
     });
 
     expect(plan.operations).toEqual([]);
@@ -78,7 +80,7 @@ describe("SyncPlanner", () => {
     ]);
   });
 
-  test("auto-propagates simple deletes in balanced mode", () => {
+  test("auto-propagates simple deletes in auto mode", () => {
     const oldLocal = file("local-deleted.md", 100);
     const oldRemote = file("remote-deleted.md", 100);
     const plan = planSync({
@@ -86,7 +88,7 @@ describe("SyncPlanner", () => {
       remote: [oldLocal],
       previous: [previous(oldLocal), previous(oldRemote)],
       ignorePatterns: [],
-      syncSafetyMode: "balanced",
+      syncSafetyMode: "auto",
       maxAutoDeleteRatio: 1
     });
 
@@ -105,14 +107,33 @@ describe("SyncPlanner", () => {
     ]);
   });
 
-  test("keeps delete-vs-modify conflicts manual in balanced mode", () => {
+  test("keeps all simple deletes manual in manual mode", () => {
+    const oldLocal = file("local-deleted.md", 100);
+    const oldRemote = file("remote-deleted.md", 100);
+    const plan = planSync({
+      local: [oldRemote],
+      remote: [oldLocal],
+      previous: [previous(oldLocal), previous(oldRemote)],
+      ignorePatterns: [],
+      syncSafetyMode: "manual",
+      maxAutoDeleteRatio: 1
+    });
+
+    expect(plan.operations).toEqual([]);
+    expect(plan.confirmations).toEqual([
+      expect.objectContaining({ path: "local-deleted.md", reason: "local-deleted" }),
+      expect.objectContaining({ path: "remote-deleted.md", reason: "remote-deleted" })
+    ]);
+  });
+
+  test("keeps delete-vs-modify conflicts manual in auto mode", () => {
     const old = file("deleted.md", 100, 10);
     const plan = planSync({
       local: [file("deleted.md", 300, 12)],
       remote: [],
       previous: [previous(old)],
       ignorePatterns: [],
-      syncSafetyMode: "balanced",
+      syncSafetyMode: "auto",
       maxAutoDeleteRatio: 1
     });
 
@@ -126,7 +147,7 @@ describe("SyncPlanner", () => {
     ]);
   });
 
-  test("downgrades large balanced delete batches to confirmations", () => {
+  test("downgrades large auto delete batches to confirmations", () => {
     const deletedA = file("deleted-a.md", 100);
     const deletedB = file("deleted-b.md", 100);
     const kept = file("kept.md", 100);
@@ -135,7 +156,7 @@ describe("SyncPlanner", () => {
       remote: [kept],
       previous: [previous(deletedA), previous(deletedB), previous(kept)],
       ignorePatterns: [],
-      syncSafetyMode: "balanced",
+      syncSafetyMode: "auto",
       maxAutoDeleteRatio: 0.3
     });
 

@@ -8,7 +8,7 @@ export interface FileEntry {
   etag?: string;
 }
 
-export type SyncSafetyMode = "safe" | "balanced" | "manual";
+export type SyncSafetyMode = "auto" | "manual";
 
 export type NonMergeableConflictPolicy = "newer-wins";
 

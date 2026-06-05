@@ -34,12 +34,19 @@ export interface PlanSyncInput {
 
 const DEFAULT_MAX_AUTO_DELETE_RATIO = 0.3;
 
+// 普通删除（一端删、另一端自上次同步未改）是否自动传播。
+// "manual"：删除都需确认；"auto"：自动传播，再受占比上限兜底。
+// 冲突型删除（delete-vs-modify）走前置 entryChanged 守卫，任何档都仍确认。
+function shouldAutoPropagateDelete(mode: SyncSafetyMode): boolean {
+  return mode === "auto";
+}
+
 export function planSync(input: PlanSyncInput): SyncPlan {
   const skipped: SkippedEntry[] = [];
   const local = buildEntryMap(input.local, "local", input.ignorePatterns, skipped, input.pluginId);
   const remote = buildEntryMap(input.remote, "remote", input.ignorePatterns, skipped, input.pluginId);
   const previous = buildPreviousMap(input.previous, input.ignorePatterns, input.pluginId);
-  const syncSafetyMode = input.syncSafetyMode ?? "safe";
+  const syncSafetyMode = input.syncSafetyMode ?? "auto";
   const maxAutoDeleteRatio = input.maxAutoDeleteRatio ?? DEFAULT_MAX_AUTO_DELETE_RATIO;
 
   const paths = new Set<string>([
@@ -165,7 +172,7 @@ function planLocalOnly(
     return;
   }
 
-  if (syncSafetyMode === "balanced") {
+  if (shouldAutoPropagateDelete(syncSafetyMode)) {
     operations.push({
       kind: "delete-local",
       path: local.path,
@@ -208,7 +215,7 @@ function planRemoteOnly(
     return;
   }
 
-  if (syncSafetyMode === "balanced") {
+  if (shouldAutoPropagateDelete(syncSafetyMode)) {
     operations.push({
       kind: "delete-remote",
       path: remote.path,

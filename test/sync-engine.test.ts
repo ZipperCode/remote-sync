@@ -96,7 +96,7 @@ const previous = (entry: FileEntry, baseContent?: string): PreviousEntry => ({
 });
 
 describe("SyncEngine", () => {
-  test("executes safe operations but requires confirmation for deletion", async () => {
+  test("executes operations but requires confirmation for deletion in manual mode", async () => {
     const oldDeleted = file("deleted.md", 100);
     const adapter = new MemoryAdapter(
       JSON.stringify({ version: 1, lastSyncTime: 123, previousEntries: [previous(oldDeleted)] })
@@ -104,7 +104,10 @@ describe("SyncEngine", () => {
     const stateStore = new SyncStateStore(adapter);
     const local = new FakeStore([file("local.md", 200)]);
     const remote = new FakeStore([file("remote.md", 200), oldDeleted]);
-    const engine = new SyncEngine(local, remote, stateStore, { ignorePatterns: [] });
+    const engine = new SyncEngine(local, remote, stateStore, {
+      ignorePatterns: [],
+      syncSafetyMode: "manual"
+    });
 
     const result = await engine.syncOnce();
 
@@ -151,7 +154,7 @@ describe("SyncEngine", () => {
     expect(adapter.value).not.toContain("deleted.md");
   });
 
-  test("auto-propagates simple deletes in balanced mode", async () => {
+  test("auto-propagates simple deletes in auto mode", async () => {
     const oldDeleted = file("deleted.md", 100);
     const adapter = new MemoryAdapter(
       JSON.stringify({ version: 1, lastSyncTime: 123, previousEntries: [previous(oldDeleted)] })
@@ -161,7 +164,7 @@ describe("SyncEngine", () => {
     const remote = new FakeStore([oldDeleted]);
     const engine = new SyncEngine(local, remote, stateStore, {
       ignorePatterns: [],
-      syncSafetyMode: "balanced",
+      syncSafetyMode: "auto",
       maxAutoDeleteRatio: 1
     });
 
@@ -617,7 +620,7 @@ describe("SyncEngine", () => {
 
     const engine = new SyncEngine(local, remote, stateStore, {
       ignorePatterns: [],
-      syncSafetyMode: "safe"
+      syncSafetyMode: "auto"
     });
 
     const result = await engine.syncOnce([], {
@@ -643,7 +646,7 @@ describe("SyncEngine", () => {
 
     const engine = new SyncEngine(local, remote, stateStore, {
       ignorePatterns: [],
-      syncSafetyMode: "safe"
+      syncSafetyMode: "auto"
     });
 
     const result = await engine.syncOnce([], {
@@ -671,7 +674,7 @@ describe("SyncEngine", () => {
     const stateStore = new SyncStateStore(adapter);
     const engine = new SyncEngine(local, remote, stateStore, {
       ignorePatterns: [],
-      syncSafetyMode: "safe"
+      syncSafetyMode: "auto"
     });
 
     const result = await engine.syncOnce([], {
@@ -726,7 +729,7 @@ describe("SyncEngine", () => {
     );
     const engine = new SyncEngine(local, remote, stateStore, {
       ignorePatterns: [],
-      syncSafetyMode: "safe"
+      syncSafetyMode: "auto"
     });
 
     const result = await engine.syncOnce([], {
@@ -767,7 +770,7 @@ describe("SyncEngine", () => {
     );
     const engine = new SyncEngine(local, remote, stateStore, {
       ignorePatterns: [],
-      syncSafetyMode: "safe"
+      syncSafetyMode: "auto"
     });
 
     const result = await engine.syncOnce([], {
@@ -803,7 +806,7 @@ describe("SyncEngine", () => {
     );
     const engine = new SyncEngine(local, remote, stateStore, {
       ignorePatterns: [],
-      syncSafetyMode: "safe"
+      syncSafetyMode: "auto"
     });
 
     const result = await engine.syncOnce([], {
@@ -896,7 +899,7 @@ describe("SyncEngine text-overlap conflict resolution", () => {
 
     const engine = new SyncEngine(local, remote, stateStore, {
       ignorePatterns: [],
-      syncSafetyMode: "balanced",
+      syncSafetyMode: "auto",
       deviceId: "laptop"
     });
 
@@ -942,7 +945,7 @@ describe("SyncEngine text-overlap conflict resolution", () => {
     const stateStore = new SyncStateStore(new MemoryStateAdapter(previousState));
     const engine = new SyncEngine(local, remote, stateStore, {
       ignorePatterns: [],
-      syncSafetyMode: "balanced",
+      syncSafetyMode: "auto",
       deviceId: "laptop"
     });
 
